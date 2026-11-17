@@ -1597,7 +1597,15 @@ button {
 
 .status-indicator {
   font-size: 9px;
+  color: var(--text-muted);
+}
+
+.status-indicator.running {
   color: #10b981;
+}
+
+.status-indicator.error {
+  color: var(--danger);
 }
 
 .status-message {
