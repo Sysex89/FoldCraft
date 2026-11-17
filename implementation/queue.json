@@ -807,6 +807,71 @@
       "owner": null,
       "vruntime": 3.0,
       "pr": "https://github.com/NicTanghe/FoldCraft/pull/50"
+    },
+    {
+      "id": "FC-0060",
+      "title": "Show the selected panel's real fabric properties in the native Fabric Mechanics panel",
+      "acceptance": "The cloth-fit --view Fabric Mechanics accordion shows the selected panel's actual density, warp/weft stretch and bending from its fabric (preset or custom), in SI units with displayed conversions, instead of the fixed 180 g/m2 / 150 / 120 N/m / 0.002 N*m placeholders; two panels with different fabrics show different values; with no panel selected the values are absent, not defaulted; CPU test covers both fabrics and the empty case.",
+      "points": 1.0,
+      "spent": 0,
+      "priority": "high",
+      "depends_on": [],
+      "status": "ready",
+      "owner": null,
+      "vruntime": 3.3420396096354286,
+      "pr": null
+    },
+    {
+      "id": "FC-0061",
+      "title": "Require an explicit easing choice when native 2D sewing joins unequal boundaries",
+      "acceptance": "The native 2D Sew tool no longer commits Command::Sew with ease: true implicitly. After the second boundary pick it shows both lengths and asks to confirm; equal lengths (within tolerance) sew without easing, unequal lengths require an explicit 'Sew with easing' action and offer cancel; Escape or cancel leaves the document and history unchanged; one confirmed seam is one undo entry; CPU tests cover equal, unequal-eased and cancelled cases.",
+      "points": 2.0,
+      "spent": 0,
+      "priority": "high",
+      "depends_on": [],
+      "status": "ready",
+      "owner": null,
+      "vruntime": 3.3420396096354286,
+      "pr": null
+    },
+    {
+      "id": "FC-0062",
+      "title": "Make inert cloth-fit UI smoke flags fail instead of passing silently",
+      "acceptance": "--ui-interaction-smoke and --ui-authoring-smoke either run real native checks that write interaction.json / authoring.json with a pass/fail result and exit nonzero on failure, or are rejected at argument parsing with a message saying they are not implemented in the cssimpler UI; neither flag can open the window and exit 0 without checking anything; scripts and docs that invoke them (first-fit.ps1, ogc.md, authoring.md) are updated to match.",
+      "points": 2.0,
+      "spent": 0,
+      "priority": "normal",
+      "depends_on": [],
+      "status": "ready",
+      "owner": null,
+      "vruntime": 3.3420396096354286,
+      "pr": null
+    },
+    {
+      "id": "FC-0063",
+      "title": "Save the native workspace to the opened project through the document writer",
+      "acceptance": "Save Project (Ctrl+S) in cloth-fit --view writes to the --project path when one was given (otherwise a clearly reported default path) using document.rs atomic replacement and portable avatar assets, not a plain write to <output>/fitting-project.json; reopening the saved file restores the template, state and settings; a failed write leaves the previous file intact and reports the error; CPU tests cover save/reopen, the no-source default and an injected write failure.",
+      "points": 2.0,
+      "spent": 0,
+      "priority": "high",
+      "depends_on": [],
+      "status": "ready",
+      "owner": null,
+      "vruntime": 3.3420396096354286,
+      "pr": null
+    },
+    {
+      "id": "FC-0064",
+      "title": "Replace the dead DXF/SVG/avatar quick actions in the native browser",
+      "acceptance": "The Import DXF/SVG/Avatar buttons in the cloth-fit --view left browser no longer point to a nonexistent File menu: each is either wired to the existing CPU importer or visibly disabled with an accurate tooltip naming the working alternative (cloth-fit --avatar for avatars, no native path for DXF/SVG yet); no status text refers to UI that does not exist; a CPU test asserts the rendered labels/tooltips.",
+      "points": 1.0,
+      "spent": 0,
+      "priority": "normal",
+      "depends_on": [],
+      "status": "ready",
+      "owner": null,
+      "vruntime": 3.342039609635428,
+      "pr": null
     }
   ]
 }
