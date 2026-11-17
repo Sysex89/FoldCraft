@@ -10,7 +10,7 @@
 //! - 2D metric pattern board with boundary curves, seam lines, notches, ruler annotations, and grainline.
 //! - Top menu & transport bar (Play/Pause, Step, Reset, Clean View, Command Palette).
 //! - 3D & 2D tool rails + Corner Tool controls.
-//! - Left Asset & Piece Browser (bundled templates catalog, piece cards, dirty doc state, import/export quick actions).
+//! - Left Asset & Piece Browser (bundled templates catalog and piece cards).
 //! - Right 5-Category Object Browser (2D Pattern, Sewing, 3D Form, Material, Environment).
 //! - Right Property Editor accordions (Information, Selected Line, Arrange, Measurements, Pins, Fabric & Appearance, Trims, Mesh Preparation, Avatar Diagnostics).
 //! - Bottom status bar (step count, execution ms, FPS, vertices, triangles, status message).
@@ -4426,103 +4426,29 @@ fn build_runner_2d_rail(state: &CssRunnerState) -> Node {
     }
 }
 
-/// An import quick action shown in the left browser.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ImportQuickAction {
-    pub label: &'static str,
-    pub tooltip: &'static str,
-}
-
-/// Import quick actions for the native workspace. None is wired yet: the CPU
-/// importers exist (`pattern_import`, `garment::svg_import`, `avatar_import`)
-/// but the native dialogs were not ported after FC-0022, so the buttons render
-/// disabled and the tooltip names the working alternative.
-pub fn import_quick_actions() -> [ImportQuickAction; 3] {
-    [
-        ImportQuickAction {
-            label: "DXF",
-            tooltip: "DXF import is not available in this window yet",
-        },
-        ImportQuickAction {
-            label: "SVG",
-            tooltip: "SVG import is not available in this window yet",
-        },
-        ImportQuickAction {
-            label: "Avatar",
-            tooltip: "Not available in this window yet; start cloth-fit with --avatar <file.obj|.gltf|.glb>",
-        },
-    ]
-}
-
-#[cfg(test)]
-mod import_quick_action_tests {
-    use super::*;
-
-    #[test]
-    fn import_quick_actions_are_disabled_and_name_working_alternatives() {
-        let actions = import_quick_actions();
-        assert_eq!(
-            actions.iter().map(|a| a.label).collect::<Vec<_>>(),
-            ["DXF", "SVG", "Avatar"]
-        );
-        for action in &actions {
-            assert!(
-                !action.tooltip.to_lowercase().contains("file menu"),
-                "{} tooltip refers to a nonexistent File menu",
-                action.label
+/// One card per bundled garment, with its panel and seam counts read from
+/// the preset itself rather than written by hand.
+fn template_cards(state: &CssRunnerState) -> Vec<Node> {
+    [(GarmentKind::Tshirt, "T-shirt"), (GarmentKind::Dress, "Dress")]
+        .into_iter()
+        .map(|(kind, title)| {
+            let preset = basic_garment(kind, 1);
+            let meta = format!(
+                "{} panels · {} seams",
+                preset.panels.len(),
+                preset.seams.len()
             );
-            assert!(
-                action
-                    .tooltip
-                    .to_lowercase()
-                    .contains("not available in this window yet")
-            );
-        }
-        assert!(actions[2].tooltip.contains("--avatar"));
-
-        let _guard = worker::WORKER_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().expect("tempdir");
-        let avatar = dir.path().join("avatar.obj");
-        std::fs::write(&avatar, "v 0 0 -10\nv 1 0 -10\nv 0 1 -10\nf 1 2 3\n")
-            .expect("write avatar");
-        let project = FittingProject::basic(GarmentKind::Tshirt, 1, avatar);
-        let scene = project.compile().expect("compile scene");
-        let files = DocumentFiles {
-            output: dir.path().join("out"),
-            source: None,
-            modified: false,
-        };
-        let (tx, latest) = worker::start_cpu().expect("start cpu worker");
-        let state = CssRunnerState::new(project, scene, files, tx, latest);
-        fn disabled_tooltips(node: &Node, out: &mut Vec<String>) {
-            if let Node::Element(el) = node {
-                if el.classes.iter().any(|c| c == "btn-action")
-                    && el.classes.iter().any(|c| c == "disabled")
-                {
-                    out.push(el.attribute("title").unwrap_or_default().to_string());
-                }
-                for child in &el.children {
-                    disabled_tooltips(child, out);
-                }
+            ui! {
+                <div class="template-entry pointer-item" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::LoadPreset(kind))}>
+                    <div class="template-header">
+                        <span class="template-title">{title}</span>
+                        <span class="template-meta">{meta}</span>
+                    </div>
+                    {template_error(state, kind)}
+                </div>
             }
-        }
-        let browser = build_runner_left_browser(&state);
-        assert!(
-            !format!("{browser:?}").to_lowercase().contains("file menu"),
-            "rendered browser refers to a nonexistent File menu"
-        );
-        let mut tooltips = Vec::new();
-        disabled_tooltips(&browser, &mut tooltips);
-        assert_eq!(
-            tooltips,
-            actions
-                .iter()
-                .map(|a| a.tooltip.to_string())
-                .collect::<Vec<_>>()
-        );
-    }
+        })
+        .collect()
 }
 
 fn build_runner_left_browser(state: &CssRunnerState) -> Node {
@@ -4545,11 +4471,7 @@ fn build_runner_left_browser(state: &CssRunnerState) -> Node {
             "piece-card"
         };
         let label = p.name.clone();
-        let id_str = if is_connected {
-            format!("{} · linked", p.id)
-        } else {
-            p.id.clone()
-        };
+        let id_str = p.id.clone();
         let meta_str = format!("Fabric: {} · Grain: {:.0}°", p.fabric, p.grain_degrees);
         piece_cards.push(ui! {
             <div class={card_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::SelectPiece(idx))}>
@@ -4574,55 +4496,9 @@ fn build_runner_left_browser(state: &CssRunnerState) -> Node {
                 <div class="browser-section">
                     <div class="section-header">
                         <span class="section-title">"Bundled Templates"</span>
-                        <span class="section-subtitle">"Engineering fixtures (metres)"</span>
                     </div>
                     <div class="template-cards-container">
-                        <div class="template-entry pointer-item" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::LoadPreset(GarmentKind::Tshirt))}>
-                            <div class="template-header">
-                                <span class="template-title">"T-shirt"</span>
-                                <span class="template-meta">"2 panels · 4 seams"</span>
-                            </div>
-                            <span class="template-description">"Two-panel engineering fixture for MakeHuman mannequin."</span>
-                            {template_error(state, GarmentKind::Tshirt)}
-                        </div>
-                        <div class="template-entry pointer-item" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::LoadPreset(GarmentKind::Dress))}>
-                            <div class="template-header">
-                                <span class="template-title">"Dress"</span>
-                                <span class="template-meta">"2 panels · 4 seams"</span>
-                            </div>
-                            <span class="template-description">"Two-panel dress fixture with curved seams."</span>
-                            {template_error(state, GarmentKind::Dress)}
-                        </div>
-                    </div>
-                </div>
-
-                <div class="browser-section">
-                    <div class="section-header">
-                        <span class="section-title">"Import & Export"</span>
-                    </div>
-                    <div class="quick-action-group">
-                        <span class="group-label">"Import"</span>
-                        <div class="quick-actions-row">
-                            {import_quick_actions()
-                                .into_iter()
-                                .map(|action| ui! {
-                                    <button class="btn-action disabled" title={action.tooltip}>{action.label}</button>
-                                })
-                                .collect::<Vec<_>>()}
-                        </div>
-                    </div>
-                    <div class="quick-action-group">
-                        <span class="group-label">"Export"</span>
-                        <div class="quick-actions-row">
-                            <button class="btn-action" onclick_shared={queue_action(&state.actions, ACT_RUN_EXPORT)}>"Export OBJ"</button>
-                            <button class="btn-action btn-action-accent" onclick_shared={queue_action(&state.actions, ACT_RUN_EXPORT)}>"True-Scale SVG"</button>
-                        </div>
-                        {inline_error("drawer-export-error", state.errors.export.as_deref())}
-                        <div class="export-accuracy-note-box">
-                            <p class="export-note-text">
-                                "Physical SVG includes stored seam allowances & sewing notches. 100 mm reference ruler verified."
-                            </p>
-                        </div>
+                        {template_cards(state)}
                     </div>
                 </div>
 
@@ -5022,11 +4898,7 @@ fn build_cat_pattern_2d(state: &CssRunnerState) -> Node {
             "tree-item pointer-item"
         };
         let label = format!("{}: {}", p.id, p.name);
-        let grain_str = if is_conn {
-            format!("{:.0}° · linked", p.grain_degrees)
-        } else {
-            format!("{:.0}°", p.grain_degrees)
-        };
+        let grain_str = format!("{:.0}°", p.grain_degrees);
         piece_rows.push(ui! {
             <div class={item_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::SelectPiece(idx))}>
                 <span>{label}</span>
@@ -9119,5 +8991,52 @@ mod top_bar_text_tests {
         }
         let viewport_3d = format!("{:?}", build_runner_3d_viewport(&state));
         assert!(!viewport_3d.contains("viewport-title") && !viewport_3d.contains("USD native"));
+    }
+}
+
+#[cfg(test)]
+mod drawer_text_tests {
+    use super::*;
+
+    #[test]
+    fn drawer_shows_preset_counts_and_no_copy() {
+        let _guard = worker::WORKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let avatar = dir.path().join("avatar.obj");
+        std::fs::write(&avatar, "v 0 0 -10\nv 1 0 -10\nv 0 1 -10\nf 1 2 3\n")
+            .expect("write avatar");
+        let project = FittingProject::basic(GarmentKind::Tshirt, 1, avatar);
+        let scene = project.compile().expect("compile scene");
+        let files = DocumentFiles {
+            output: dir.path().join("out"),
+            source: None,
+            modified: false,
+        };
+        let (tx, latest) = worker::start_cpu().expect("start cpu worker");
+        let state = CssRunnerState::new(project, scene, files, tx, latest);
+        let drawer = format!("{:?}", build_runner_left_browser(&state));
+        for kind in [GarmentKind::Tshirt, GarmentKind::Dress] {
+            let preset = basic_garment(kind, 1);
+            let meta = format!(
+                "{} panels · {} seams",
+                preset.panels.len(),
+                preset.seams.len()
+            );
+            assert!(drawer.contains(&meta), "{kind:?}: {meta}");
+        }
+        for gone in [
+            "Engineering fixtures",
+            "fixture",
+            "reference ruler",
+            "not available in this window",
+            "Export OBJ",
+            "True-Scale SVG",
+            "Apron",
+            "linked",
+        ] {
+            assert!(!drawer.contains(gone), "drawer still shows {gone:?}");
+        }
     }
 }
