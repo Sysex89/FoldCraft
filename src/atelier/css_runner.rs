@@ -5735,9 +5735,18 @@ fn build_runner_property_accordions(state: &CssRunnerState) -> Node {
 
 fn build_runner_status_bar(state: &CssRunnerState) -> Node {
     let step_info = format!(
-        "Step: {} | Worker: {:.1} ms | Tool: {} / {}",
-        state.step_count, state.step_ms, state.active_3d_tool, state.active_2d_tool
+        "Step: {} | Worker: {:.1} ms",
+        state.step_count, state.step_ms
     );
+    // The dot carries the simulation state: running, stopped, or stopped by
+    // a worker error (whose text sits beside the transport controls).
+    let indicator_class = if state.errors.solver.is_some() {
+        "status-indicator error"
+    } else if state.playing {
+        "status-indicator running"
+    } else {
+        "status-indicator"
+    };
     let mesh_info = format!(
         "Cloth: {} verts, {} tris | Avatar: {} tris",
         state.scene.state.x.len(),
@@ -5748,7 +5757,7 @@ fn build_runner_status_bar(state: &CssRunnerState) -> Node {
     ui! {
         <footer class="status-bar">
             <div class="status-left">
-                <span class="status-indicator">"●"</span>
+                <span id="sim-state-indicator" class={indicator_class}>"●"</span>
                 <span class="status-message">{step_info}</span>
             </div>
             <div class="status-right">
@@ -9007,5 +9016,56 @@ mod tests {
                 tip_node.layout
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod status_bar_tests {
+    use super::*;
+
+    fn indicator_classes(state: &CssRunnerState) -> Vec<String> {
+        fn find(node: &Node) -> Option<Vec<String>> {
+            let Node::Element(el) = node else {
+                return None;
+            };
+            if el.id.as_deref() == Some("sim-state-indicator") {
+                return Some(el.classes.clone());
+            }
+            el.children.iter().find_map(find)
+        }
+        find(&build_runner_status_bar(state)).expect("indicator is rendered")
+    }
+
+    #[test]
+    fn status_bar_shows_values_and_state_by_colour() {
+        let _guard = worker::WORKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let avatar = dir.path().join("avatar.obj");
+        std::fs::write(&avatar, "v 0 0 -10\nv 1 0 -10\nv 0 1 -10\nf 1 2 3\n")
+            .expect("write avatar");
+        let project = FittingProject::basic(GarmentKind::Tshirt, 1, avatar);
+        let scene = project.compile().expect("compile scene");
+        let files = DocumentFiles {
+            output: dir.path().join("out"),
+            source: None,
+            modified: false,
+        };
+        let (tx, latest) = worker::start_cpu().expect("start cpu worker");
+        let mut state = CssRunnerState::new(project, scene, files, tx, latest);
+
+        let text = format!("{:?}", build_runner_status_bar(&state));
+        assert!(!text.contains("Tool:"), "{text}");
+        assert!(text.contains("Step: 0"));
+
+        let has = |state: &CssRunnerState, class: &str| {
+            indicator_classes(state).iter().any(|c| c == class)
+        };
+        assert!(!has(&state, "running") && !has(&state, "error"));
+        state.playing = true;
+        assert!(has(&state, "running"));
+        state.errors.solver = Some("worker stopped".into());
+        assert!(has(&state, "error") && !has(&state, "running"));
     }
 }
