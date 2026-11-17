@@ -4278,35 +4278,35 @@ fn build_runner_3d_rail(state: &CssRunnerState) -> Node {
 
     ui! {
         <aside id="rail-3d" class="tool-rail tool-rail-3d">
-            <button class={gizmo_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_GIZMO)} title="Select & Arrange [Gizmo] (1)">
+            <button class={gizmo_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_GIZMO)}>
                 {icon_gizmo()}
                 <span class="tool-label">"Gizmo"</span>
             </button>
-            <button class={grab_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_GRAB)} title="Grab Cloth (Pull & Drag in Simulation) (W)">
+            <button class={grab_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_GRAB)}>
                 {icon_grab()}
                 <span class="tool-label">"Grab"</span>
             </button>
-            <button class={sew3d_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_SEW3D)} title="3D Segment Sewing (N)">
+            <button class={sew3d_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_SEW3D)}>
                 {icon_sew_3d()}
                 <span class="tool-label">"3D Sew"</span>
             </button>
-            <button class={pin_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_PIN)} title="Pin Cloth [Click vertices] (P)">
+            <button class={pin_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_PIN)}>
                 {icon_pin()}
                 <span class="tool-label">"Pin"</span>
             </button>
-            <button class={msr_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_MEASURE3D)} title="3D Tape Measure (T)">
+            <button class={msr_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_MEASURE3D)}>
                 {icon_measure_3d()}
                 <span class="tool-label">"Measure"</span>
             </button>
-            <button id="avatar-diagnostics-btn" class={avatar_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_AVATAR_DIAG)} title="Avatar & Dress Form Diagnostics (Shift+A)">
+            <button id="avatar-diagnostics-btn" class={avatar_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_AVATAR_DIAG)}>
                 {icon_dress_form()}
                 <span class="tool-label">"Avatar"</span>
             </button>
-            <button class="tool-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_CAM_RESET)} title="Reset Camera View [Framing] (0)">
+            <button class="tool-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_CAM_RESET)}>
                 {icon_cam_reset()}
-                <span class="tool-label">"Reset"</span>
+                <span class="tool-label">"Reset Camera"</span>
             </button>
-            <button class="tool-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_DRAWER_TOGGLE)} title="Toggle Asset & Piece Drawer (Tab)">
+            <button class="tool-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_DRAWER_TOGGLE)}>
                 {icon_sidebar_toggle()}
                 <span class="tool-label">"Drawer"</span>
             </button>
@@ -4377,47 +4377,47 @@ fn build_runner_2d_rail(state: &CssRunnerState) -> Node {
 
     ui! {
         <aside id="rail-2d" class="tool-rail tool-rail-2d">
-            <button class={edit_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_EDIT2D)} title="Edit Point / Transform (Z / A)">
+            <button class={edit_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_EDIT2D)}>
                 {icon_edit_2d()}
                 <span class="tool-label">"Edit"</span>
             </button>
-            <button class={rect_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_RECT2D)} title="Draw Rectangle Pattern (S)">
+            <button class={rect_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_RECT2D)}>
                 {icon_rect_2d()}
                 <span class="tool-label">"Rect"</span>
             </button>
-            <button class={pen_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_PEN2D)} title="Draw Polygon Pattern (H)">
+            <button class={pen_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_PEN2D)}>
                 {icon_polygon_2d()}
                 <span class="tool-label">"Pen"</span>
             </button>
-            <button class={free_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_FREE2D)} title="Freehand Pattern Curve (F)">
+            <button class={free_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_FREE2D)}>
                 {icon_freehand_2d()}
                 <span class="tool-label">"Free"</span>
             </button>
-            <button class={sew_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_SEW2D)} title="Sew Seams (B)">
+            <button class={sew_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_SEW2D)}>
                 {icon_sew_2d()}
                 <span class="tool-label">"Sew"</span>
             </button>
-            <button class={split_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_SPLIT2D)} title="Split / Add Point (X)">
+            <button class={split_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_SPLIT2D)}>
                 {icon_split_2d()}
                 <span class="tool-label">"Split"</span>
             </button>
-            <button class={line_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_INTERNAL2D)} title="Internal Polygon / Line (G)">
+            <button class={line_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_INTERNAL2D)}>
                 {icon_internal_2d()}
                 <span class="tool-label">"Line"</span>
             </button>
-            <button class={tape_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_MEASURE2D)} title="2D Tape Measure (M)">
+            <button class={tape_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_MEASURE2D)}>
                 {icon_measure_2d()}
                 <span class="tool-label">"Tape"</span>
             </button>
-            <button class={trim_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_TRIM2D)} title="Trim (T)">
+            <button class={trim_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_TRIM2D)}>
                 {icon_trim_2d()}
                 <span class="tool-label">"Trim"</span>
             </button>
-            <button id="tool-corner-select-2d" class={corner_select_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_CORNER_SELECT2D)} title="Select Corners (V / Shift+Click multi)">
+            <button id="tool-corner-select-2d" class={corner_select_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_CORNER_SELECT2D)}>
                 {icon_corner_select_2d()}
                 <span class="tool-label">"Select Corner"</span>
             </button>
-            <button id="tool-corner-round-2d" class={corner_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_CORNER2D)} title="Corner Rounding Menu & Fillet (C)">
+            <button id="tool-corner-round-2d" class={corner_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_CORNER2D)}>
                 {icon_corner_2d()}
                 <span class="tool-label">"Corner"</span>
             </button>
@@ -8994,18 +8994,8 @@ mod tests {
             None
         }
 
-        for (btn_id, expected_tooltip) in [
-            (
-                "#tool-corner-select-2d",
-                "Select Corners (V / Shift+Click multi)",
-            ),
-            ("#tool-corner-round-2d", "Corner Rounding Menu & Fillet (C)"),
-            (
-                "#avatar-diagnostics-btn",
-                "Avatar & Dress Form Diagnostics (Shift+A)",
-            ),
-            ("#theme-toggle", "Theme"),
-        ] {
+        {
+            let (btn_id, expected_tooltip) = ("#theme-toggle", "Theme");
             let trimmed_id = btn_id.trim_start_matches('#');
             assert_eq!(find_dom_title(&ui_tree, trimmed_id), Some(expected_tooltip));
             let btn_node = find_by_id(&base_scene, trimmed_id)
@@ -9054,7 +9044,7 @@ mod top_bar_text_tests {
     use super::*;
 
     #[test]
-    fn top_bar_has_names_only_and_tooltips_only_on_icon_buttons() {
+    fn top_bar_and_rails_have_names_only_and_tooltips_only_on_icon_buttons() {
         let _guard = worker::WORKER_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -9092,5 +9082,11 @@ mod top_bar_text_tests {
                 assert!(!text.contains(gone), "top bar still shows {gone:?}");
             }
         }
+
+        // Rail buttons are labelled, so they carry no tooltips.
+        for rail in [build_runner_3d_rail(&state), build_runner_2d_rail(&state)] {
+            assert_eq!(tooltip_policy_violations(&rail), Vec::<String>::new());
+        }
+        assert!(format!("{:?}", build_runner_3d_rail(&state)).contains("\"Reset Camera\""));
     }
 }
