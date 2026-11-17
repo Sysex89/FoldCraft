@@ -1744,3 +1744,36 @@ button {
     padding: 6px;
 }
 .solver-dropdown .menu-item { padding: 10px; text-align: left; }
+
+/* ============================================================================
+   Inline errors: one line beside the control whose action failed.
+   ============================================================================ */
+
+.inline-error {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--danger);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 320px;
+  min-width: 0;
+}
+
+.board-error {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  max-width: 80%;
+  padding: 3px 8px;
+  background-color: var(--surface-raised);
+  border: 1px solid var(--danger);
+  border-radius: 4px;
+  z-index: 5;
+}
+
+.seam-ease {
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
