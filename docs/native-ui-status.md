@@ -22,11 +22,11 @@ Audit: 17 November 2026, against `main` at `fcd319a`. FC-0022 ([NicTanghe/FoldCr
 
 - 2D board drawing: pen polygon, primitives, freehand panels, internal lines, linked mirrors, anchor moves, multi-point moves, point removal, curve toggling, boundary splits, line removal and the Delete key for selected points.
 - Corner tools: single and batch fillets with live preview, and corner handle adjustment (`authoring/corner_tool.rs`).
-- 2D sewing (`Command::Sew`) and seam removal. The second boundary click commits a whole-edge seam (`range: [0, 1]`, not reversed) with `ease: true`, without the egui-era confirmation step. Unequal lengths are therefore eased implicitly rather than by an explicit user choice.
-- Saved measurements (`Command::SetMeasurement`).
+- 2D sewing (`Command::Sew`) and seam removal. The second boundary click commits a whole-edge seam (`range: [0, 1]`, not reversed) as one undo step; there is no confirmation card. Easing is enabled only when the two lengths differ under the seam compiler's tolerance, and the Sewing tab shows the accepted mismatch as `ease … mm` on that seam's row. Undo reverts an unwanted seam.
+- Saved measurements (`Command::SetMeasurement`). The 2D header shows the measured distance in mm, and the live distance while the second point is placed.
 - Undo/redo for these 2D edits.
 - Play/pause, step, reset, the solver dropdown, clean view, light/dark theme and the command palette.
-- Loading the bundled T-shirt or dress preset (the Apron entry reports that it is planned).
+- Loading the bundled T-shirt or dress preset.
 - **Save Project (Ctrl+S)** writes `<--output>/fitting-project.json`, including the state and settings. It goes through `FittingProject::save`, so the write is atomic and the avatar is copied into the adjacent `.assets` folder, but it never writes to the file passed to `--project`.
 - Export of OBJ/SVG artifacts to the output directory.
 - 3D viewport orbit and zoom.
@@ -37,7 +37,11 @@ Audit: 17 November 2026, against `main` at `fcd319a`. FC-0022 ([NicTanghe/FoldCr
 - Panel placement (translation/rotation) in the Arrange accordion.
 - Pin count and mode in the Pins accordion.
 - The **Fabric Mechanics** accordion shows fixed values (180 g/m², 150/120 N/m, 0.002 N·m) for every panel. Only the preset name comes from the document. The values are not the panel's compiled properties.
-- 3D rail modes Gizmo, Grab, 3D Sew, Pin, Measure and Avatar Diagnostics. Each one only sets a status label.
+- 3D rail modes Gizmo, Grab, 3D Sew, Pin, Measure and Avatar Diagnostics. Each one only highlights its rail button.
+
+## Messages and errors
+
+The workspace has no status message. Selection, active tool and settings are shown by highlight, enabled/disabled state and values; Undo/Redo, Round, Curve and Straight are disabled when they have nothing to act on, and Enter on a Pen or Internal Line draft below its minimum point count leaves the draft unchanged. Errors the user must act on are one line beside what failed (`InlineErrors` in `css_runner.rs`): Save, Export, the transport (worker failure), the bundled template card, and the 2D board (rejected edits and corner rounding). Each is cleared when its action next succeeds; the board error is also cleared by a tool change or Escape. USD viewport errors go to stderr.
 
 ## Not ported (CPU API only)
 

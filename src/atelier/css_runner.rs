@@ -40,7 +40,7 @@ use marvelous_cloth::css_ui::icons::*;
 use marvelous_cloth::css_ui::{Theme, ViewLayoutMode, load_studio_stylesheet};
 use marvelous_cloth::fitting::{FittingProject, FittingScene};
 use marvelous_cloth::garment::{
-    GarmentTemplate, curves, export,
+    CompiledGarment, GarmentTemplate, curves, export,
     meshing::MeshingSettings,
     polygon::{MeasurementAnchor, PatternMeasurement, PolygonPattern},
     presets::{GarmentKind, basic as basic_garment},
@@ -232,14 +232,6 @@ pub enum ToolDraft2d {
     Sew {
         first_edge: Option<(String, String)>,
     },
-    /// Both boundaries are picked; nothing is committed until the user
-    /// confirms. Unequal lengths can only be sewn with explicit easing.
-    SewConfirm {
-        a: (String, String),
-        b: (String, String),
-        a_len_m: f64,
-        b_len_m: f64,
-    },
     InternalLine {
         panel_id: String,
         points_local_m: Vec<DVec2>,
@@ -266,9 +258,24 @@ pub enum RunnerUiOp {
     Redo2d,
     SelectPiece(usize),
     LoadPreset(GarmentKind),
-    StatusNote(String),
-    ConfirmSew { ease: bool },
-    CancelSew,
+}
+
+/// One-line errors the user has to act on. Each slot is drawn next to the
+/// control whose action failed and is cleared when that action next succeeds.
+/// Success, progress and hints are never stored here: state is shown through
+/// highlight, enabled/disabled and values instead of words.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InlineErrors {
+    /// Shown beside Save.
+    pub save: Option<String>,
+    /// Shown beside the Export buttons.
+    pub export: Option<String>,
+    /// Shown beside the transport controls; the simulation stopped.
+    pub solver: Option<String>,
+    /// Shown on the bundled template card that failed to load.
+    pub template: Option<(GarmentKind, String)>,
+    /// Shown on the 2D board; describes the last board action only.
+    pub board: Option<String>,
 }
 
 // ============================================================================
@@ -312,7 +319,7 @@ pub struct CssRunnerState {
     pub hovered_2d: Option<Hover2dTarget>,
     pub drag_2d: Option<Drag2d>,
     pub draft_2d: Option<ToolDraft2d>,
-    pub status_message: String,
+    pub errors: InlineErrors,
     pub pointer_down: bool,
     pub dragging_3d: bool,
     pub last_pointer_pos: (f32, f32),
@@ -388,7 +395,7 @@ impl CssRunnerState {
             hovered_2d: None,
             drag_2d: None,
             draft_2d: None,
-            status_message: "Ready".to_string(),
+            errors: InlineErrors::default(),
             pointer_down: false,
             dragging_3d: false,
             last_pointer_pos: (0.0, 0.0),
@@ -482,7 +489,7 @@ impl CssRunnerState {
             && let Err(error) =
                 marvelous_cloth::usd_scene::update_viewport_camera(scene, &self.camera)
         {
-            self.status_message = format!("USD camera error: {error}");
+            eprintln!("USD camera error: {error}");
         }
     }
 
@@ -494,7 +501,7 @@ impl CssRunnerState {
                     &marvelous_cloth::usd_scene::viewport_panel_path(&panel.id),
                     &self.scene.state.x[panel.vertices.clone()],
                 ) {
-                    self.status_message = format!("USD update error: {error}");
+                    eprintln!("USD update error: {error}");
                 }
             }
         }
@@ -517,8 +524,7 @@ impl CssRunnerState {
         self.worker_pending = false;
         self.last_metrics = None;
         self.step_ms = 0.0;
-        self.status_message =
-            "Solver changed; paused at displayed state. Press Play or Step.".into();
+        self.errors.solver = None;
         self.send_control_state(false);
     }
 
@@ -530,7 +536,7 @@ impl CssRunnerState {
         self.last_metrics = None;
         self.worker_pending = false;
         self.playing = false;
-        self.status_message = "Reset simulation state".to_string();
+        self.errors.solver = None;
         self.sync_usd_points();
         self.send_control_state(false);
     }
@@ -558,18 +564,9 @@ impl CssRunnerState {
         match snapshot.save(&path) {
             Ok(_) => {
                 self.project = snapshot;
-                self.status_message = if is_default {
-                    format!(
-                        "Saved {} (no --project file was opened; default output location)",
-                        path.display()
-                    )
-                } else {
-                    format!("Saved {}", path.display())
-                };
+                self.errors.save = None;
             }
-            Err(e) => {
-                self.status_message = format!("Save error: {e}; {} was not changed", path.display())
-            }
+            Err(e) => self.errors.save = Some(e.to_string()),
         }
     }
 
@@ -581,11 +578,8 @@ impl CssRunnerState {
             &self.scene.state,
             &self.files.output,
         ) {
-            Ok(_) => {
-                self.status_message =
-                    format!("Exported artifacts to {}", self.files.output.display())
-            }
-            Err(e) => self.status_message = format!("Export error: {e}"),
+            Ok(_) => self.errors.export = None,
+            Err(e) => self.errors.export = Some(e.to_string()),
         }
     }
 }
@@ -624,8 +618,12 @@ mod save_project_tests {
         state.project.template.panels[0].name = "Renamed by save test".into();
 
         assert_eq!(state.save_target(), (source.clone(), false));
+        state.errors.save = Some("stale".into());
         state.save_project();
-        assert_eq!(state.status_message, format!("Saved {}", source.display()));
+        assert_eq!(
+            state.errors.save, None,
+            "a successful save clears its error"
+        );
         assert!(
             !dir.path().join("out/fitting-project.json").exists(),
             "save must not fall back to the output directory when a source exists"
@@ -644,7 +642,7 @@ mod save_project_tests {
     }
 
     #[test]
-    fn save_without_a_source_reports_the_default_location() {
+    fn save_without_a_source_writes_the_default_location() {
         let _guard = worker::WORKER_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -654,11 +652,7 @@ mod save_project_tests {
         assert_eq!(state.save_target(), (expected.clone(), true));
         state.save_project();
         assert!(expected.is_file());
-        assert!(
-            state.status_message.contains("default output location"),
-            "{}",
-            state.status_message
-        );
+        assert_eq!(state.errors.save, None);
         FittingProject::load(&expected).expect("reopen default save");
     }
 
@@ -675,12 +669,12 @@ mod save_project_tests {
 
         state.scene.state.x[0].x = f64::NAN;
         state.save_project();
-        assert!(
-            state.status_message.starts_with("Save error:")
-                && state.status_message.contains("was not changed"),
-            "{}",
-            state.status_message
-        );
+        let error = state
+            .errors
+            .save
+            .clone()
+            .expect("rejected save sets the Save error");
+        assert!(!error.is_empty() && !error.contains('\n'), "{error}");
         assert_eq!(std::fs::read(&source).expect("reread source"), before);
     }
 }
@@ -707,32 +701,13 @@ pub fn update_runner(state: &mut CssRunnerState, frame: FrameInfo) -> Invalidati
                 state.scene.state = new_state;
                 state.step_count += 1;
                 state.step_ms = metrics.step_ms;
-                let residual = metrics.barrier_al.as_ref().map_or_else(
-                    || {
-                        metrics
-                            .residual_rms_n
-                            .map_or("N/A".into(), |r| format!("{r:.1e} N RMS"))
-                    },
-                    |al| {
-                        format!(
-                            "{:.1e} N max, gap {:.1e} m",
-                            al.original_force_max_n, al.primal_m
-                        )
-                    },
-                );
-                state.status_message = format!(
-                    "Step {}: min dist {:.3} mm, residual {}, {:.1} ms",
-                    state.step_count,
-                    metrics.minimum_distance_m * 1000.,
-                    residual,
-                    metrics.step_ms
-                );
+                state.errors.solver = None;
                 state.last_metrics = Some(metrics);
                 state.sync_usd_points();
             }
             Err(e) => {
                 state.playing = false;
-                state.status_message = format!("Worker error: {e}");
+                state.errors.solver = Some(e.to_string());
                 state.send_control_state(false);
             }
         }
@@ -834,7 +809,6 @@ pub fn update_runner(state: &mut CssRunnerState, frame: FrameInfo) -> Invalidati
             Some(&state.scene.collider.surface),
         );
         state.sync_usd_camera();
-        state.status_message = "Reset 3D camera".to_string();
     }
     if actions & ACT_RUN_PIECE_NEXT != 0 {
         let count = state.project.template.panels.len().max(1);
@@ -842,33 +816,27 @@ pub fn update_runner(state: &mut CssRunnerState, frame: FrameInfo) -> Invalidati
     }
     if actions & ACT_RUN_TOOL_GIZMO != 0 || actions & ACT_RUN_TOOL_SELECT != 0 {
         state.active_3d_tool = "Gizmo".to_string();
-        state.status_message = "3D Tool: Gizmo — drag 3D viewport to orbit".to_string();
     }
     if actions & ACT_RUN_TOOL_GRAB != 0 {
         state.active_3d_tool = "Grab".to_string();
-        state.status_message = "3D Tool: Grab".to_string();
     }
     if actions & ACT_RUN_TOOL_SEW3D != 0 {
         state.active_3d_tool = "3D Sew".to_string();
         state.active_category = ObjectCategory::Sewing;
-        state.status_message = "3D Tool: 3D Sew (inspect seams in Object Browser)".to_string();
     }
     if actions & ACT_RUN_TOOL_PIN != 0 {
         state.active_3d_tool = "Pin".to_string();
         state.accordion_open[3] = true;
         state.open_accordion_idx = 3;
-        state.status_message = "3D Tool: Pin".to_string();
     }
     if actions & ACT_RUN_TOOL_MEASURE3D != 0 {
         state.active_3d_tool = "Measure".to_string();
-        state.status_message = "3D Tool: 3D Measure".to_string();
     }
     if actions & ACT_RUN_TOOL_AVATAR_DIAG != 0 {
         state.active_3d_tool = "Avatar Diagnostics".to_string();
         state.active_category = ObjectCategory::Environment;
         state.accordion_open[5] = true;
         state.open_accordion_idx = 5;
-        state.status_message = "3D Tool: Avatar Diagnostics".to_string();
     }
     if actions & ACT_RUN_TOOL_EDIT2D != 0 {
         set_active_2d_tool(state, "Edit");
@@ -973,14 +941,6 @@ pub fn update_runner(state: &mut CssRunnerState, frame: FrameInfo) -> Invalidati
     if actions & ACT_RUN_2D_NEXT_PIECE != 0 {
         let count = state.project.template.panels.len().max(1);
         state.selected_piece_index = (state.selected_piece_index + 1) % count;
-        if let Some(p) = state
-            .project
-            .template
-            .panels
-            .get(state.selected_piece_index)
-        {
-            state.status_message = format!("Selected piece: {} ({})", p.name, p.id);
-        }
     }
     if state.selected_piece_index != prev_piece {
         prev_piece = state.selected_piece_index;
@@ -1011,64 +971,23 @@ fn set_active_2d_tool(state: &mut CssRunnerState, tool: &str) {
     state.active_2d_tool = tool.to_string();
     state.draft_2d = None;
     state.preview_template = None;
+    state.errors.board = None;
     match tool {
-        "Edit" => {
-            state.status_message =
-                "2D Tool: Edit — click/drag corners, edges, or Bézier handles".into();
-        }
         "Corner Select" => {
             state.accordion_open[1] = true;
             state.open_accordion_idx = 1;
-            state.status_message =
-                "2D Tool: Select Corners — click or Shift+click corners to multi-select".into();
-        }
-        "Rect" => {
-            state.corner_preview_active = false;
-            state.status_message = "2D Tool: Rect — drag on board to create rectangle".into();
-        }
-        "Pen" => {
-            state.corner_preview_active = false;
-            state.status_message =
-                "2D Tool: Pen — click vertices on board, Enter or click start to close".into();
-        }
-        "Freehand" => {
-            state.corner_preview_active = false;
-            state.status_message = "2D Tool: Freehand — drag on board to sketch contour".into();
         }
         "Sew" => {
             state.corner_preview_active = false;
             state.active_category = ObjectCategory::Sewing;
-            state.status_message = "2D Tool: Sew — click two edges to create a seam".into();
-        }
-        "Split" => {
-            state.corner_preview_active = false;
-            state.status_message =
-                "2D Tool: Split — click a boundary edge to insert a point".into();
-        }
-        "Internal Line" => {
-            state.corner_preview_active = false;
-            state.status_message =
-                "2D Tool: Internal Line — click points inside piece, Enter to finish".into();
-        }
-        "Measure" => {
-            state.corner_preview_active = false;
-            state.status_message =
-                "2D Tool: Measure — click two points on board to measure distance".into();
-        }
-        "Trim" => {
-            state.corner_preview_active = false;
-            state.status_message =
-                "2D Tool: Trim — click corner, sewn edge, or internal line to remove".into();
         }
         "Corner" => {
             state.corner_preview_active = true;
             state.accordion_open[1] = true;
             state.open_accordion_idx = 1;
-            state.status_message =
-                "2D Tool: Corner Rounding Menu — adjust settings to preview or click/drag corner to round"
-                    .into();
         }
-        _ => {}
+        "Edit" => {}
+        _ => state.corner_preview_active = false,
     }
 }
 
@@ -1107,27 +1026,19 @@ fn apply_runner_ui_op(state: &mut CssRunnerState, op: RunnerUiOp) {
         RunnerUiOp::SetCornerMode(radius) => {
             state.corner_mode_radius = radius;
             state.corner_preview_active = true;
-            state.status_message = if radius {
-                "Corner mode: Radius (circular fillet)".into()
-            } else {
-                format!("Corner mode: Shape (tension {:.2})", state.corner_tension)
-            };
         }
         RunnerUiOp::SetCornerRule(rule) => {
             state.corner_rule = rule;
             state.corner_preview_active = true;
-            state.status_message = format!("Continuity rule: {:?}", rule);
         }
         RunnerUiOp::AdjustCornerRadiusMm(delta) => {
             state.corner_radius_mm = (state.corner_radius_mm + delta).clamp(1.0, 250.0);
             state.corner_preview_active = true;
-            state.status_message = format!("Corner radius: {:.1} mm", state.corner_radius_mm);
         }
         RunnerUiOp::AdjustCornerTension(delta) => {
             state.corner_tension = (state.corner_tension + delta).clamp(0.05, 1.5);
             state.corner_mode_radius = false;
             state.corner_preview_active = true;
-            state.status_message = format!("Corner tension: {:.2}", state.corner_tension);
         }
         RunnerUiOp::ApplyCornerRoundSelected => {
             round_selected_corner(state);
@@ -1142,11 +1053,9 @@ fn apply_runner_ui_op(state: &mut CssRunnerState, op: RunnerUiOp) {
             undo_redo_2d(state, true);
         }
         RunnerUiOp::SelectPiece(idx) => {
-            if let Some(p) = state.project.template.panels.get(idx) {
-                let msg = format!("Selected piece: {} ({})", p.name, p.id);
+            if idx < state.project.template.panels.len() {
                 state.selected_piece_index = idx;
                 state.clear_2d_subselection();
-                state.status_message = msg;
             }
         }
         RunnerUiOp::LoadPreset(kind) => {
@@ -1207,23 +1116,13 @@ fn apply_runner_ui_op(state: &mut CssRunnerState, op: RunnerUiOp) {
                     }
                     state.sync_usd_camera();
                     state.send_control_state(false);
-                    state.status_message = format!("Loaded {} preset", kind.name());
+                    state.errors.template = None;
+                    state.errors.solver = None;
+                    state.errors.board = None;
                 }
                 Err(err) => {
-                    state.status_message = format!("Preset compile error: {err}");
+                    state.errors.template = Some((kind, err.to_string()));
                 }
-            }
-        }
-        RunnerUiOp::StatusNote(msg) => {
-            state.status_message = msg;
-        }
-        RunnerUiOp::ConfirmSew { ease } => {
-            confirm_pending_sew(state, ease);
-        }
-        RunnerUiOp::CancelSew => {
-            if matches!(state.draft_2d, Some(ToolDraft2d::SewConfirm { .. })) {
-                state.draft_2d = None;
-                state.status_message = "Sewing cancelled; no seam was added".into();
             }
         }
     }
@@ -2000,7 +1899,6 @@ fn install_authoring_edit(
     state: &mut CssRunnerState,
     edit: authoring::Edit,
     record_old: Option<GarmentTemplate>,
-    msg: String,
 ) {
     if let Some(old) = record_old {
         state.history.record(old);
@@ -2054,7 +1952,7 @@ fn install_authoring_edit(
     }
 
     sanitize_2d_subselection(state);
-    state.status_message = msg;
+    state.errors.board = None;
 }
 
 /// Same relative tolerance the seam compiler uses before it demands `allow_ease`
@@ -2063,62 +1961,17 @@ pub fn sew_lengths_equal(a_len_m: f64, b_len_m: f64) -> bool {
     (a_len_m - b_len_m).abs() <= 1e-8 * a_len_m.max(b_len_m)
 }
 
-fn sew_confirm_prompt(
-    a_panel: &str,
-    a_edge: &str,
-    b_panel: &str,
-    b_edge: &str,
+/// Sew two picked boundaries immediately; one undo step reverts it. Easing is
+/// enabled only when the lengths differ under the seam compiler's tolerance,
+/// and the Sewing tab shows the resulting ease as a value on the seam row.
+pub fn sew_boundaries(
+    state: &mut CssRunnerState,
+    a: (String, String),
+    b: (String, String),
     a_len_m: f64,
     b_len_m: f64,
-) -> String {
-    let lengths = format!(
-        "Sew {a_panel}.{a_edge} ({:.1} mm) ↔ {b_panel}.{b_edge} ({:.1} mm)",
-        a_len_m * 1e3,
-        b_len_m * 1e3
-    );
-    if sew_lengths_equal(a_len_m, b_len_m) {
-        format!("{lengths}: press Enter or Sew to confirm, Escape to cancel")
-    } else {
-        format!(
-            "{lengths}: lengths differ by {:.1} mm; choose Sew with easing or Escape to cancel",
-            (a_len_m - b_len_m).abs() * 1e3
-        )
-    }
-}
-
-/// Commit the pending seam. Without `ease`, unequal lengths are refused and the
-/// draft is kept so the user can still choose easing or cancel.
-pub fn confirm_pending_sew(state: &mut CssRunnerState, ease: bool) -> bool {
-    let Some(ToolDraft2d::SewConfirm {
-        a,
-        b,
-        a_len_m,
-        b_len_m,
-    }) = state.draft_2d.clone()
-    else {
-        return false;
-    };
-    let equal = sew_lengths_equal(a_len_m, b_len_m);
-    if !ease && !equal {
-        state.status_message = format!(
-            "Lengths differ by {:.1} mm: choose Sew with easing to accept the mismatch, or Escape to cancel",
-            (a_len_m - b_len_m).abs() * 1e3
-        );
-        return false;
-    }
+) -> bool {
     state.draft_2d = None;
-    let message = if equal {
-        format!("Sewed {}.{} ↔ {}.{}", a.0, a.1, b.0, b.1)
-    } else {
-        format!(
-            "Sewed {}.{} ↔ {}.{} with {:.1} mm easing",
-            a.0,
-            a.1,
-            b.0,
-            b.1,
-            (a_len_m - b_len_m).abs() * 1e3
-        )
-    };
     commit_authoring_command(
         state,
         Command::Sew {
@@ -2137,26 +1990,29 @@ pub fn confirm_pending_sew(state: &mut CssRunnerState, ease: bool) -> bool {
                 range: [0.0, 1.0],
             },
             reverse: false,
-            ease: ease && !equal,
+            ease: !sew_lengths_equal(a_len_m, b_len_m),
         },
-        message,
     )
 }
 
-#[cfg(test)]
-mod sew_confirmation_tests {
-    use super::*;
+/// Length mismatch an eased seam absorbs, from the compiled rest lengths.
+/// `None` for seams that are not eased or are not compiled.
+pub fn seam_ease_m(
+    template: &GarmentTemplate,
+    garment: &CompiledGarment,
+    seam_id: &str,
+) -> Option<f64> {
+    template
+        .seams
+        .iter()
+        .find(|s| s.id == seam_id && s.allow_ease)?;
+    let compiled = garment.seams.iter().find(|s| s.id == seam_id)?;
+    Some((compiled.lengths[0] - compiled.lengths[1]).abs())
+}
 
-    fn named_key(name: &str) -> EngineEvent {
-        EngineEvent::Key(cssimpler::renderer::KeyboardEvent {
-            logical_key: cssimpler::renderer::KeyIdentity::Named(name.into()),
-            physical_key: None,
-            location: cssimpler::renderer::KeyLocation::Standard,
-            state: cssimpler::renderer::ButtonState::Pressed,
-            repeat: false,
-            modifiers: cssimpler::renderer::KeyboardModifiers::default(),
-        })
-    }
+#[cfg(test)]
+mod sew_tests {
+    use super::*;
 
     type EdgeLen = (String, String, f64);
 
@@ -2193,17 +2049,18 @@ mod sew_confirmation_tests {
         )
     }
 
-    fn pending_sew(pair: &(EdgeLen, EdgeLen)) -> ToolDraft2d {
-        ToolDraft2d::SewConfirm {
-            a: (pair.0.0.clone(), pair.0.1.clone()),
-            b: (pair.1.0.clone(), pair.1.1.clone()),
-            a_len_m: pair.0.2,
-            b_len_m: pair.1.2,
-        }
+    fn sew(state: &mut CssRunnerState, pair: &(EdgeLen, EdgeLen)) -> bool {
+        sew_boundaries(
+            state,
+            (pair.0.0.clone(), pair.0.1.clone()),
+            (pair.1.0.clone(), pair.1.1.clone()),
+            pair.0.2,
+            pair.1.2,
+        )
     }
 
     #[test]
-    fn native_sewing_requires_an_explicit_easing_choice() {
+    fn sewing_commits_at_once_and_undo_reverts_it() {
         let _guard = worker::WORKER_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -2224,98 +2081,260 @@ mod sew_confirmation_tests {
         let mut state = CssRunnerState::new(project, scene, files, tx, latest);
         let (equal, unequal) = sew_pairs(&state.project.template);
 
-        // Unequal lengths: plain confirmation (button or Enter) is refused and
-        // keeps the draft; nothing is committed.
-        state.draft_2d = Some(pending_sew(&unequal));
-        assert!(!confirm_pending_sew(&mut state, false));
-        assert!(handle_runner_event(&mut state, &named_key("Enter")));
-        assert!(state.project.template.seams.is_empty());
-        assert!(matches!(
-            state.draft_2d,
-            Some(ToolDraft2d::SewConfirm { .. })
-        ));
-        assert!(state.status_message.contains("Sew with easing"));
-
-        // Escape cancels: document and history unchanged.
-        assert!(handle_runner_event(&mut state, &named_key("Escape")));
-        assert!(state.draft_2d.is_none());
-        assert!(state.project.template.seams.is_empty());
-        assert!(
-            !undo_redo_2d(&mut state, false),
-            "cancel must not create history"
-        );
-
-        // Cancel button behaves the same way.
-        state.draft_2d = Some(pending_sew(&unequal));
-        apply_runner_ui_op(&mut state, RunnerUiOp::CancelSew);
-        assert!(state.draft_2d.is_none());
-        assert!(state.project.template.seams.is_empty());
-
-        // Explicit easing commits one eased seam as one undo entry.
-        state.draft_2d = Some(pending_sew(&unequal));
-        apply_runner_ui_op(&mut state, RunnerUiOp::ConfirmSew { ease: true });
+        // Equal lengths: one plain seam, no ease to report.
+        assert!(sew(&mut state, &equal));
+        assert_eq!(state.project.template.seams.len(), 1);
+        let seam = state.project.template.seams[0].clone();
+        assert!(!seam.allow_ease);
         assert_eq!(
-            state.project.template.seams.len(),
-            1,
-            "{}",
-            state.status_message
+            seam_ease_m(&state.project.template, &state.scene.garment, &seam.id),
+            None
         );
-        assert!(state.project.template.seams[0].allow_ease);
-        assert!(state.status_message.contains("easing"));
         assert!(undo_redo_2d(&mut state, false));
         assert!(state.project.template.seams.is_empty());
 
-        // Equal lengths: Enter sews without easing.
-        state.draft_2d = Some(pending_sew(&equal));
-        assert!(handle_runner_event(&mut state, &named_key("Enter")));
-        assert_eq!(
-            state.project.template.seams.len(),
-            1,
-            "{}",
-            state.status_message
+        // Unequal lengths: committed eased, and the ease equals the compiled
+        // length mismatch so the user can see what was accepted.
+        assert!(sew(&mut state, &unequal));
+        assert_eq!(state.project.template.seams.len(), 1);
+        let seam = state.project.template.seams[0].clone();
+        assert!(seam.allow_ease);
+        let ease = seam_ease_m(&state.project.template, &state.scene.garment, &seam.id)
+            .expect("eased seam reports its ease");
+        assert!(
+            (ease - (unequal.0.2 - unequal.1.2).abs()).abs() < 1e-9,
+            "ease {ease} vs picked lengths {} / {}",
+            unequal.0.2,
+            unequal.1.2
         );
-        assert!(!state.project.template.seams[0].allow_ease);
         assert!(state.draft_2d.is_none());
+
+        // One undo step removes it; redo brings it back.
+        assert!(undo_redo_2d(&mut state, false));
+        assert!(state.project.template.seams.is_empty());
+        assert!(undo_redo_2d(&mut state, true));
+        assert_eq!(state.project.template.seams.len(), 1);
     }
 }
 
-pub fn commit_authoring_command(
-    state: &mut CssRunnerState,
-    cmd: Command,
-    msg: impl Into<String>,
-) -> bool {
+#[cfg(test)]
+mod inline_error_tests {
+    use super::*;
+
+    fn test_state(dir: &std::path::Path, source: Option<std::path::PathBuf>) -> CssRunnerState {
+        let avatar = dir.join("avatar.obj");
+        std::fs::write(&avatar, "v 0 0 -10\nv 1 0 -10\nv 0 1 -10\nf 1 2 3\n")
+            .expect("write avatar");
+        let project = FittingProject::basic(GarmentKind::Tshirt, 1, avatar);
+        let scene = project.compile().expect("compile scene");
+        let files = DocumentFiles {
+            output: dir.join("out"),
+            source,
+            modified: false,
+        };
+        let (tx, latest) = worker::start_cpu().expect("start cpu worker");
+        CssRunnerState::new(project, scene, files, tx, latest)
+    }
+
+    fn find_by_id<'a>(node: &'a Node, id: &str) -> Option<&'a cssimpler::core::ElementNode> {
+        let Node::Element(el) = node else {
+            return None;
+        };
+        if el.id.as_deref() == Some(id) {
+            return Some(el);
+        }
+        el.children.iter().find_map(|child| find_by_id(child, id))
+    }
+
+    fn text_of(node: &Node) -> String {
+        match node {
+            Node::Text(text) => text.clone(),
+            Node::Element(el) => el.children.iter().map(text_of).collect(),
+        }
+    }
+
+    fn is_disabled(ui: &Node, id: &str) -> bool {
+        find_by_id(ui, id)
+            .unwrap_or_else(|| panic!("#{id} is rendered"))
+            .classes
+            .iter()
+            .any(|c| c == "disabled")
+    }
+
+    #[test]
+    fn save_error_sits_beside_save_and_clears_after_a_good_save() {
+        let _guard = worker::WORKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("garment.json");
+        let mut state = test_state(dir.path(), Some(source.clone()));
+        state.project.save(&source).expect("seed source document");
+
+        let good = state.scene.state.x[0];
+        state.scene.state.x[0].x = f64::NAN;
+        state.save_project();
+        let ui = build_runner_ui(&state);
+        let error = find_by_id(&ui, "save-error").expect("save error is rendered");
+        let text = text_of(&Node::Element(error.clone()));
+        assert!(!text.is_empty() && !text.contains('\n'), "{text}");
+
+        state.scene.state.x[0] = good;
+        state.save_project();
+        assert_eq!(state.errors.save, None);
+        assert!(find_by_id(&build_runner_ui(&state), "save-error").is_none());
+    }
+
+    #[test]
+    fn rejected_board_edit_shows_on_the_board_until_an_edit_succeeds() {
+        let _guard = worker::WORKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut state = test_state(dir.path(), None);
+        let before = state.project.template.clone();
+
+        assert!(!commit_authoring_command(
+            &mut state,
+            Command::RemovePoint {
+                panel: "no-such-panel".into(),
+                point: 0,
+            },
+        ));
+        assert_eq!(state.project.template.panels.len(), before.panels.len());
+        let board = build_runner_2d_viewport(&state);
+        let error = find_by_id(&board, "board-error").expect("board error is rendered");
+        assert!(!text_of(&Node::Element(error.clone())).is_empty());
+
+        let pid = state.project.template.panels[0].id.clone();
+        assert!(commit_authoring_command(
+            &mut state,
+            Command::CurvePoints {
+                points: vec![(pid, 0)],
+                curved: true,
+            },
+        ));
+        assert_eq!(state.errors.board, None);
+        assert!(find_by_id(&build_runner_2d_viewport(&state), "board-error").is_none());
+
+        // Switching tools also drops an error about the previous board action.
+        state.errors.board = Some("stale".into());
+        set_active_2d_tool(&mut state, "Edit");
+        assert_eq!(state.errors.board, None);
+    }
+
+    #[test]
+    fn actions_without_a_target_are_disabled_and_silent() {
+        let _guard = worker::WORKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut state = test_state(dir.path(), None);
+        state.clear_2d_subselection();
+
+        let board = build_runner_2d_viewport(&state);
+        for id in [
+            "cad-undo-btn",
+            "cad-redo-btn",
+            "cad-apply-round-btn",
+            "cad-curve-on-btn",
+            "cad-curve-off-btn",
+        ] {
+            assert!(is_disabled(&board, id), "#{id} must be disabled");
+        }
+
+        let before = state.project.template.clone();
+        apply_runner_ui_op(&mut state, RunnerUiOp::ApplyCornerRoundSelected);
+        apply_runner_ui_op(&mut state, RunnerUiOp::ToggleSelectedCurve(true));
+        apply_runner_ui_op(&mut state, RunnerUiOp::Undo2d);
+        assert_eq!(state.errors, InlineErrors::default());
+        assert_eq!(
+            serde_json::to_string(&state.project.template).unwrap(),
+            serde_json::to_string(&before).unwrap()
+        );
+
+        // With a target, Round and Curve enable; after an edit, Undo enables.
+        let pid = state.project.template.panels[0].id.clone();
+        state.set_single_2d_point(pid.clone(), 0);
+        let board = build_runner_2d_viewport(&state);
+        assert!(!is_disabled(&board, "cad-apply-round-btn"));
+        assert!(!is_disabled(&board, "cad-curve-on-btn"));
+        assert!(commit_authoring_command(
+            &mut state,
+            Command::CurvePoints {
+                points: vec![(pid, 0)],
+                curved: true,
+            },
+        ));
+        assert!(!is_disabled(
+            &build_runner_2d_viewport(&state),
+            "cad-undo-btn"
+        ));
+    }
+
+    #[test]
+    fn enter_on_a_short_pen_draft_keeps_it() {
+        let _guard = worker::WORKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut state = test_state(dir.path(), None);
+        let draft = ToolDraft2d::Pen {
+            points_board_m: vec![DVec2::new(0.0, 0.0), DVec2::new(0.2, 0.0)],
+            hover_board_m: None,
+        };
+        state.draft_2d = Some(draft);
+        let panels = state.project.template.panels.len();
+        assert!(finish_pen_draft(&mut state));
+        assert!(matches!(
+            &state.draft_2d,
+            Some(ToolDraft2d::Pen { points_board_m, .. }) if points_board_m.len() == 2
+        ));
+        assert_eq!(state.project.template.panels.len(), panels);
+        assert_eq!(state.errors, InlineErrors::default());
+    }
+}
+
+pub fn commit_authoring_command(state: &mut CssRunnerState, cmd: Command) -> bool {
     state.preview_template = None;
     let before = state.project.template.clone();
     match authoring::apply(&before, cmd) {
         Ok(edit) => {
-            install_authoring_edit(state, edit, Some(before), msg.into());
+            install_authoring_edit(state, edit, Some(before));
             true
         }
         Err(err) => {
-            state.status_message = format!("Edit rejected: {err}");
+            state.errors.board = Some(err.to_string());
             false
         }
     }
 }
 
+/// Undo or redo one 2D edit. An empty stack is a no-op (the buttons are
+/// disabled); a target that no longer compiles is a board error.
 pub fn undo_redo_2d(state: &mut CssRunnerState, redo: bool) -> bool {
     state.preview_template = None;
+    let available = if redo {
+        state.history.can_redo()
+    } else {
+        state.history.can_undo()
+    };
+    if !available {
+        return false;
+    }
     match state.history.restore(&state.project.template, redo) {
         Ok(edit) => {
-            let label = if redo {
-                "Redid 2D edit"
-            } else {
-                "Undid 2D edit"
-            };
-            install_authoring_edit(state, edit, None, label.into());
+            install_authoring_edit(state, edit, None);
             true
         }
         Err(err) => {
-            state.status_message = err;
+            state.errors.board = Some(err);
             false
         }
     }
 }
+
+const CORNER_TOO_SHORT: &str = "Adjacent edges are too short to round";
 
 fn round_corners_batch(
     state: &mut CssRunnerState,
@@ -2326,7 +2345,7 @@ fn round_corners_batch(
         return false;
     };
     let Some(eff_r) = clamp_fillet_radius_m(state.corner_radius_mm, max_radius_m) else {
-        state.status_message = "Incident boundaries too short to round".into();
+        state.errors.board = Some(CORNER_TOO_SHORT.into());
         return false;
     };
     let tension = if state.corner_mode_radius {
@@ -2334,22 +2353,7 @@ fn round_corners_batch(
     } else {
         state.corner_tension
     };
-    let total_corners = validate_fillet_batch(&state.project.template, corners, eff_r, tension)
-        .map_or(corners.len(), |v| v.corners.len());
-
     if corners.len() == 1 {
-        let linked_extra = total_corners.saturating_sub(1);
-        let msg = if linked_extra > 0 {
-            format!(
-                "Rounded corner on {edge_name} (+{linked_extra} linked) (R={:.1} mm, T={tension:.2})",
-                eff_r * 1000.0
-            )
-        } else {
-            format!(
-                "Rounded corner on {edge_name} (R={:.1} mm, T={tension:.2})",
-                eff_r * 1000.0
-            )
-        };
         let ok = commit_authoring_command(
             state,
             Command::RoundCornerShape {
@@ -2359,7 +2363,6 @@ fn round_corners_batch(
                 tension,
                 rule: state.corner_rule,
             },
-            msg,
         );
         if ok {
             state.clear_2d_subselection();
@@ -2388,11 +2391,6 @@ fn round_corners_batch(
             tension,
             rule: state.corner_rule,
         },
-        format!(
-            "Rounded {} selected corners ({total_corners} total w/ linked) (R={:.1} mm, T={tension:.2})",
-            corners.len(),
-            eff_r * 1000.0
-        ),
     );
     if ok {
         state.clear_2d_subselection();
@@ -2424,7 +2422,7 @@ fn round_selected_corner(state: &mut CssRunnerState) -> bool {
     };
 
     if corners.is_empty() {
-        state.status_message = "Select one or more corner points first to round".into();
+        // Round is disabled without a selection; Enter falls through silently.
         return false;
     }
     match connected_batch_fillet_max_radius_m(&state.project.template, &corners) {
@@ -2432,11 +2430,11 @@ fn round_selected_corner(state: &mut CssRunnerState) -> bool {
             round_corners_batch(state, &corners, val.max_radius_m)
         }
         Ok(_) => {
-            state.status_message = "Incident boundaries too short to round".into();
+            state.errors.board = Some(CORNER_TOO_SHORT.into());
             false
         }
         Err(err) => {
-            state.status_message = format!("Cannot round corner: {err}");
+            state.errors.board = Some(err.to_string());
             false
         }
     }
@@ -2460,22 +2458,10 @@ fn toggle_selected_curve(state: &mut CssRunnerState, curved: bool) -> bool {
         Vec::new()
     };
     if points.is_empty() {
-        state.status_message = "Select a point or boundary to toggle Bézier curves".into();
+        // Curve and Straight are disabled without a selection.
         return false;
     }
-    let count = points.len();
-    let msg = if count == 1 {
-        if curved {
-            "Converted incident boundaries to cubic Bézier".to_string()
-        } else {
-            "Straightened incident boundaries".to_string()
-        }
-    } else if curved {
-        format!("Converted incident boundaries on {count} selected corners to cubic Bézier")
-    } else {
-        format!("Straightened incident boundaries on {count} selected corners")
-    };
-    commit_authoring_command(state, Command::CurvePoints { points, curved }, msg)
+    commit_authoring_command(state, Command::CurvePoints { points, curved })
 }
 
 fn update_preview_point(
@@ -2535,14 +2521,16 @@ fn update_preview_bezier_handle(
 }
 
 fn finish_pen_draft(state: &mut CssRunnerState) -> bool {
+    let Some(ToolDraft2d::Pen { points_board_m, .. }) = &state.draft_2d else {
+        return false;
+    };
+    // Closing needs a polygon; until then Enter keeps the draft unchanged.
+    if points_board_m.len() < 3 {
+        return true;
+    }
     let Some(ToolDraft2d::Pen { points_board_m, .. }) = state.draft_2d.take() else {
         return false;
     };
-    if points_board_m.len() < 3 {
-        state.status_message = "Pen tool requires at least 3 vertices".into();
-        return true;
-    }
-    let count = points_board_m.len();
     let fabric = default_fabric_id(state);
     commit_authoring_command(
         state,
@@ -2553,12 +2541,18 @@ fn finish_pen_draft(state: &mut CssRunnerState) -> bool {
             fabric,
             replace: false,
         },
-        format!("Created {count}-point polygon pattern"),
     );
     true
 }
 
 fn finish_internal_line_draft(state: &mut CssRunnerState) -> bool {
+    let Some(ToolDraft2d::InternalLine { points_local_m, .. }) = &state.draft_2d else {
+        return false;
+    };
+    // A line needs two points; until then Enter keeps the draft unchanged.
+    if points_local_m.len() < 2 {
+        return true;
+    }
     let Some(ToolDraft2d::InternalLine {
         panel_id,
         points_local_m,
@@ -2567,10 +2561,6 @@ fn finish_internal_line_draft(state: &mut CssRunnerState) -> bool {
     else {
         return false;
     };
-    if points_local_m.len() < 2 {
-        state.status_message = "Internal Line requires at least 2 points".into();
-        return true;
-    }
     let count = points_local_m.len();
     commit_authoring_command(
         state,
@@ -2579,7 +2569,6 @@ fn finish_internal_line_draft(state: &mut CssRunnerState) -> bool {
             points: points_local_m,
             tangents: vec![DVec2::ZERO; count],
         },
-        format!("Added {count}-point internal line on {panel_id}"),
     );
     true
 }
@@ -2720,14 +2709,6 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                         let count = state.project.template.panels.len().max(1);
                         state.selected_piece_index = (state.selected_piece_index + 1) % count;
                         state.clear_2d_subselection();
-                        if let Some(p) = state
-                            .project
-                            .template
-                            .panels
-                            .get(state.selected_piece_index)
-                        {
-                            state.status_message = format!("Selected piece: {} ({})", p.name, p.id);
-                        }
                         return true;
                     }
                     if ch == "[" {
@@ -2735,14 +2716,6 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                         state.selected_piece_index =
                             (state.selected_piece_index + count - 1) % count;
                         state.clear_2d_subselection();
-                        if let Some(p) = state
-                            .project
-                            .template
-                            .panels
-                            .get(state.selected_piece_index)
-                        {
-                            state.status_message = format!("Selected piece: {} ({})", p.name, p.id);
-                        }
                         return true;
                     }
                     if ch == "+" || ch == "=" {
@@ -2768,7 +2741,7 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                         }
                         if state.draft_2d.is_some() {
                             state.draft_2d = None;
-                            state.status_message = "Cancelled 2D tool draft".into();
+                            state.errors.board = None;
                             return true;
                         }
                         if state.drag_2d.is_some()
@@ -2785,11 +2758,9 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                     if name == "Delete" || name == "Backspace" {
                         let sel_pts = effective_selected_points(state);
                         if sel_pts.len() > 1 {
-                            let count = sel_pts.len();
                             if commit_authoring_command(
                                 state,
                                 Command::RemovePoints { points: sel_pts },
-                                format!("Removed {count} selected corners"),
                             ) {
                                 state.clear_2d_subselection();
                             }
@@ -2798,7 +2769,6 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                             if commit_authoring_command(
                                 state,
                                 Command::RemovePoint { panel, point },
-                                format!("Removed point #{point}"),
                             ) {
                                 state.clear_2d_subselection();
                             }
@@ -2806,10 +2776,6 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                         }
                     }
                     if name == "Enter" {
-                        if matches!(state.draft_2d, Some(ToolDraft2d::SewConfirm { .. })) {
-                            confirm_pending_sew(state, false);
-                            return true;
-                        }
                         if matches!(state.draft_2d, Some(ToolDraft2d::Pen { .. })) {
                             return finish_pen_draft(state);
                         }
@@ -2884,16 +2850,12 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                                     start_board_m: board_m,
                                     current_board_m: board_m,
                                 });
-                                state.status_message =
-                                    "Rect: drag to size new rectangle pattern".into();
                                 return true;
                             }
                             "Freehand" => {
                                 state.draft_2d = Some(ToolDraft2d::Freehand {
                                     samples_board_m: vec![board_m],
                                 });
-                                state.status_message =
-                                    "Freehand: drag to sketch contour, release to create".into();
                                 return true;
                             }
                             "Pen" => {
@@ -2906,27 +2868,21 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                                 if should_close {
                                     return finish_pen_draft(state);
                                 }
-                                let count = match &mut state.draft_2d {
+                                match &mut state.draft_2d {
                                     Some(ToolDraft2d::Pen {
                                         points_board_m,
                                         hover_board_m,
                                     }) => {
                                         points_board_m.push(board_m);
                                         *hover_board_m = Some(board_m);
-                                        points_board_m.len()
                                     }
                                     _ => {
                                         state.draft_2d = Some(ToolDraft2d::Pen {
                                             points_board_m: vec![board_m],
                                             hover_board_m: Some(board_m),
                                         });
-                                        1
                                     }
-                                };
-                                state.status_message = format!(
-                                    "Pen: {count} vertex{} — Enter or click start point to close",
-                                    if count == 1 { "" } else { "es" }
-                                );
+                                }
                                 return true;
                             }
                             "Internal Line" => {
@@ -2973,7 +2929,7 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                                     if close_double {
                                         return finish_internal_line_draft(state);
                                     }
-                                    let count = match &mut state.draft_2d {
+                                    match &mut state.draft_2d {
                                         Some(ToolDraft2d::InternalLine {
                                             panel_id,
                                             points_local_m,
@@ -2981,21 +2937,15 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                                         }) if panel_id == &pid => {
                                             points_local_m.push(local);
                                             *hover_local_m = Some(local);
-                                            points_local_m.len()
                                         }
                                         _ => {
                                             state.draft_2d = Some(ToolDraft2d::InternalLine {
-                                                panel_id: pid.clone(),
+                                                panel_id: pid,
                                                 points_local_m: vec![local],
                                                 hover_local_m: Some(local),
                                             });
-                                            1
                                         }
-                                    };
-                                    state.status_message = format!(
-                                        "Internal Line on {pid}: {count} point{} (Enter to finish)",
-                                        if count == 1 { "" } else { "s" }
-                                    );
+                                    }
                                     return true;
                                 }
                             }
@@ -3022,9 +2972,7 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                                     }) = state.draft_2d.clone()
                                     {
                                         if first_pid == &pid && first_edge == &edge_name {
-                                            state.status_message =
-                                                "Pick a second different boundary edge to sew"
-                                                    .into();
+                                            // Re-picking the first boundary keeps the draft.
                                             return true;
                                         }
                                         let length = |panel: &str, edge: &str| {
@@ -3041,29 +2989,22 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                                             length(&pid, &edge_name),
                                         ) else {
                                             state.draft_2d = None;
-                                            state.status_message =
-                                                "Sew: could not measure a boundary; nothing was sewn"
-                                                    .into();
+                                            state.errors.board =
+                                                Some("Boundary length cannot be measured".into());
                                             return true;
                                         };
-                                        state.draft_2d = Some(ToolDraft2d::SewConfirm {
-                                            a: (first_pid.clone(), first_edge.clone()),
-                                            b: (pid.clone(), edge_name.clone()),
+                                        sew_boundaries(
+                                            state,
+                                            (first_pid.clone(), first_edge.clone()),
+                                            (pid, edge_name),
                                             a_len_m,
-                                            b_len_m,
-                                        });
-                                        state.status_message = sew_confirm_prompt(
-                                            first_pid, first_edge, &pid, &edge_name, a_len_m,
                                             b_len_m,
                                         );
                                         return true;
                                     } else {
                                         state.draft_2d = Some(ToolDraft2d::Sew {
-                                            first_edge: Some((pid.clone(), edge_name.clone())),
+                                            first_edge: Some((pid, edge_name)),
                                         });
-                                        state.status_message = format!(
-                                            "Sew: selected {pid}.{edge_name} — click second edge"
-                                        );
                                         return true;
                                     }
                                 }
@@ -3115,13 +3056,10 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                                                     panel: pa,
                                                     measurement,
                                                 },
-                                                format!("Measured & saved: {dist_mm:.1} mm"),
                                             ) {
                                                 return true;
                                             }
                                         }
-                                        state.status_message =
-                                            format!("Measured distance: {dist_mm:.1} mm");
                                         return true;
                                     }
                                     _ => {
@@ -3132,9 +3070,6 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                                             first_anchor: anchor,
                                             last_distance_mm: None,
                                         });
-                                        state.status_message =
-                                            "Measure: click second point to measure distance"
-                                                .into();
                                         return true;
                                     }
                                 }
@@ -3151,14 +3086,12 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                                             state.project.template.panels.get(panel_idx)
                                         {
                                             let pid = p.id.clone();
-                                            let pname = p.name.clone();
                                             commit_authoring_command(
                                                 state,
                                                 Command::RemovePoint {
                                                     panel: pid,
                                                     point: point_idx,
                                                 },
-                                                format!("Removed corner #{point_idx} on {pname}"),
                                             );
                                             return true;
                                         }
@@ -3191,7 +3124,6 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                                                 commit_authoring_command(
                                                     state,
                                                     Command::RemoveSeam { seam: seam_id },
-                                                    format!("Removed seam on {pid}.{edge_name}"),
                                                 );
                                                 return true;
                                             }
@@ -3203,15 +3135,9 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                                                         anchor: edge_idx,
                                                         curved: false,
                                                     },
-                                                    format!(
-                                                        "Straightened curved boundary {edge_name}"
-                                                    ),
                                                 );
                                                 return true;
                                             }
-                                            state.status_message = format!(
-                                                "Trim: {edge_name} has no seam or curve to trim"
-                                            );
                                             return true;
                                         }
                                     }
@@ -3250,7 +3176,6 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                                                     panel: pid,
                                                     line: line_id.clone(),
                                                 },
-                                                format!("Removed internal line {line_id}"),
                                             );
                                             return true;
                                         }
@@ -3367,12 +3292,6 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                                         panel_idx,
                                         board_m,
                                     );
-                                    let partners: Vec<String> =
-                                        connected_edges(&state.project.template, &pid, &ename)
-                                            .into_iter()
-                                            .filter(|ce| ce.panel != pid)
-                                            .map(|ce| ce.panel)
-                                            .collect();
                                     state.selected_piece_index = panel_idx;
                                     state.clear_2d_subselection();
                                     state.selected_2d_edge = Some((pid.clone(), ename.clone()));
@@ -3386,14 +3305,6 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                                         moved: false,
                                         last_local: local,
                                     });
-                                    state.status_message = if partners.is_empty() {
-                                        format!("Editing Bézier handle {handle_index} on {ename}")
-                                    } else {
-                                        format!(
-                                            "Editing Bézier handle {handle_index} on {ename} (linked: {})",
-                                            partners.join(", ")
-                                        )
-                                    };
                                     return true;
                                 }
                             }
@@ -3404,7 +3315,6 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                                 let point_info =
                                     state.project.template.panels.get(panel_idx).map(|p| {
                                         let pid = p.id.clone();
-                                        let pname = p.name.clone();
                                         let local = board_to_panel_pt(
                                             &state.project.template,
                                             panel_idx,
@@ -3416,25 +3326,9 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                                             .and_then(|poly| poly.edges.get(point_idx))
                                             .cloned();
                                         let rot_deg = p.layout_rotation_degrees;
-                                        let partners: Vec<String> = connected_corners(
-                                            &state.project.template,
-                                            &pid,
-                                            point_idx,
-                                        )
-                                        .into_iter()
-                                        .filter(|c| c.panel != pid)
-                                        .map(|c| c.panel)
-                                        .collect();
-                                        (pid, pname, local, edge_name, rot_deg, partners)
+                                        (pid, local, edge_name, rot_deg)
                                     });
-                                if let Some((pid, pname, local, edge_name, rot_deg, partners)) =
-                                    point_info
-                                {
-                                    let link_suffix = if partners.is_empty() {
-                                        String::new()
-                                    } else {
-                                        format!(" (linked: {})", partners.join(", "))
-                                    };
+                                if let Some((pid, local, edge_name, rot_deg)) = point_info {
                                     let sel_pts = effective_selected_points(state);
 
                                     if multi_mod {
@@ -3443,18 +3337,10 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                                         state.accordion_open[1] = true;
                                         state.open_accordion_idx = 1;
                                         let new_pts = effective_selected_points(state);
-                                        let count = new_pts.len();
                                         if state.active_2d_tool == "Corner"
                                             || state.active_2d_tool == "Corner Select"
                                             || !new_pts.contains(&(pid.clone(), point_idx))
                                         {
-                                            state.status_message = if count == 0 {
-                                                format!("Cleared corner selection on {pname}")
-                                            } else {
-                                                format!(
-                                                    "Selected {count} corners ({pname} #{point_idx}{link_suffix})"
-                                                )
-                                            };
                                             return true;
                                         }
                                         state.drag_2d = Some(Drag2d::Point {
@@ -3468,9 +3354,6 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                                             last_board_m: board_m,
                                             collapse_on_click: None,
                                         });
-                                        state.status_message = format!(
-                                            "Selected {count} corners ({pname} #{point_idx}{link_suffix})"
-                                        );
                                         return true;
                                     }
 
@@ -3490,9 +3373,6 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
 
                                     if state.active_2d_tool == "Corner Select" {
                                         state.set_single_2d_point(pid.clone(), point_idx);
-                                        state.status_message = format!(
-                                            "Selected corner #{point_idx} on {pname}{link_suffix}"
-                                        );
                                         return true;
                                     } else if state.active_2d_tool == "Corner" {
                                         let batch_corners = if already_in_multi {
@@ -3522,9 +3402,8 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                                                         state.corner_radius_mm,
                                                         base_val.max_radius_m,
                                                     ) else {
-                                                        state.status_message =
-                                                            "Incident boundaries too short to round"
-                                                                .into();
+                                                        state.errors.board =
+                                                            Some(CORNER_TOO_SHORT.into());
                                                         return true;
                                                     };
                                                     match validate_fillet_batch(
@@ -3572,13 +3451,13 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                                                             return true;
                                                         }
                                                         Err(err) => {
-                                                            state.status_message = err;
+                                                            state.errors.board = Some(err);
                                                             return true;
                                                         }
                                                     }
                                                 }
                                                 Err(err) => {
-                                                    state.status_message = err;
+                                                    state.errors.board = Some(err);
                                                     return true;
                                                 }
                                             }
@@ -3586,16 +3465,6 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                                     } else {
                                         let collapse_on_click =
                                             already_in_multi.then(|| (pid.clone(), point_idx));
-                                        let status_msg = if already_in_multi {
-                                            format!(
-                                                "Dragging {} selected corners{link_suffix}",
-                                                active_pts.len()
-                                            )
-                                        } else {
-                                            format!(
-                                                "Selected corner #{point_idx} on {pname}{link_suffix}"
-                                            )
-                                        };
                                         state.drag_2d = Some(Drag2d::Point {
                                             panel_id: pid,
                                             point_idx,
@@ -3607,7 +3476,6 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                                             last_board_m: board_m,
                                             collapse_on_click,
                                         });
-                                        state.status_message = status_msg;
                                         return true;
                                     }
                                 }
@@ -3621,19 +3489,12 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                                     && let Some(edge_name) = poly.edges.get(edge_idx)
                                 {
                                     let pid = p.id.clone();
-                                    let pname = p.name.clone();
                                     let ename = edge_name.clone();
                                     let sampled_opt = if state.active_2d_tool == "Split" {
                                         poly.edge_points(edge_idx).ok()
                                     } else {
                                         None
                                     };
-                                    let partners: Vec<String> =
-                                        connected_edges(&state.project.template, &pid, &ename)
-                                            .into_iter()
-                                            .filter(|ce| ce.panel != pid)
-                                            .map(|ce| ce.panel)
-                                            .collect();
                                     state.selected_piece_index = panel_idx;
                                     state.clear_2d_subselection();
                                     state.selected_2d_edge = Some((pid.clone(), ename.clone()));
@@ -3675,20 +3536,11 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                                                         edge: ename.clone(),
                                                         at_m,
                                                     },
-                                                    format!("Split boundary {ename}"),
                                                 );
                                             }
                                         }
                                         return true;
                                     }
-                                    state.status_message = if partners.is_empty() {
-                                        format!("Selected edge {ename} on {pname}")
-                                    } else {
-                                        format!(
-                                            "Selected edge {ename} on {pname} (linked: {})",
-                                            partners.join(", ")
-                                        )
-                                    };
                                     return true;
                                 }
                             }
@@ -3701,10 +3553,6 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                                     start_pan: state.board_2d_pan,
                                     start_pointer: (px, py),
                                 });
-                                if let Some(p) = state.project.template.panels.get(panel_idx) {
-                                    state.status_message =
-                                        format!("Selected piece: {} ({})", p.name, p.id);
-                                }
                                 return true;
                             }
                             None => {
@@ -3755,15 +3603,7 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                                 fabric,
                                 replace: false,
                             },
-                            format!(
-                                "Created rectangle {:.0}×{:.0} mm",
-                                size.x * 1000.0,
-                                size.y * 1000.0
-                            ),
                         );
-                    } else {
-                        state.status_message =
-                            "Drag at least 30×30 mm to create a rectangle".into();
                     }
                     return true;
                 }
@@ -3780,11 +3620,7 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                                 meshing: MeshingSettings::default(),
                                 fabric,
                             },
-                            "Created freehand pattern piece",
                         );
-                    } else {
-                        state.status_message =
-                            "Draw a closed freehand loop to create a pattern piece".into();
                     }
                     return true;
                 }
@@ -3810,18 +3646,12 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                                 let board_delta = screen_to_board_unclamped_m(state, px, py)
                                     .unwrap_or(last_board_m)
                                     - start_board_m;
-                                let count = points.len();
                                 commit_authoring_command(
                                     state,
                                     Command::MovePointGroupsConnected {
                                         points,
                                         board_delta,
                                     },
-                                    format!(
-                                        "Moved {count} corners ({:.1}, {:.1}) mm",
-                                        board_delta.x * 1000.0,
-                                        board_delta.y * 1000.0
-                                    ),
                                 );
                             } else {
                                 let local = screen_to_board_unclamped_m(state, px, py)
@@ -3848,11 +3678,6 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                                         anchor: point_idx,
                                         position: local,
                                     },
-                                    format!(
-                                        "Moved point #{point_idx} to ({:.1}, {:.1}) mm",
-                                        local.x * 1000.0,
-                                        local.y * 1000.0
-                                    ),
                                 );
                             }
                             return true;
@@ -3876,7 +3701,6 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                                         position: last_local,
                                         rule: state.corner_rule,
                                     },
-                                    format!("Adjusted Bézier handle on {edge_name}"),
                                 );
                             }
                             return true;
@@ -4111,8 +3935,6 @@ pub fn handle_runner_event(state: &mut CssRunnerState, event: &EngineEvent) -> b
                             let min_r = 0.001_f64.min(max_clamp);
                             let radius_m = (proj / denom).clamp(min_r, max_clamp.max(min_r));
                             state.corner_radius_mm = radius_m * 1000.0;
-                            state.status_message =
-                                format!("Corner preview radius: {:.1} mm", state.corner_radius_mm);
                         }
                         state.drag_2d = Some(Drag2d::CornerRadius {
                             panel_id,
@@ -4221,6 +4043,23 @@ pub fn build_runner_ui(state: &CssRunnerState) -> Node {
     }
 }
 
+/// The load error for one bundled template card, shown on that card.
+fn template_error(state: &CssRunnerState, kind: GarmentKind) -> Node {
+    let message = match &state.errors.template {
+        Some((failed, message)) if *failed == kind => Some(message.as_str()),
+        _ => None,
+    };
+    inline_error("template-error", message)
+}
+
+/// One-line error beside the control whose action failed, or an empty span.
+fn inline_error(id: &'static str, message: Option<&str>) -> Node {
+    match message {
+        Some(message) => ui! { <span id={id} class="inline-error">{message.to_string()}</span> },
+        None => ui! { <span class="hidden" /> },
+    }
+}
+
 fn build_runner_top_bar(state: &CssRunnerState) -> Node {
     let play_label = if state.playing { "Pause" } else { "Play" };
     let play_class = if state.playing {
@@ -4258,7 +4097,9 @@ fn build_runner_top_bar(state: &CssRunnerState) -> Node {
                 <span class="app-title">"FoldCraft | Simulation Studio V2"</span>
                 <nav class="top-bar-menus">
                     <button class="menu-item" onclick_shared={queue_action(&state.actions, ACT_RUN_SAVE)}>"Save Project (Ctrl+S)"</button>
+                    {inline_error("save-error", state.errors.save.as_deref())}
                     <button class="menu-item" onclick_shared={queue_action(&state.actions, ACT_RUN_EXPORT)}>"Export Artifacts"</button>
+                    {inline_error("export-error", state.errors.export.as_deref())}
                 </nav>
             </div>
             <div class="transport-controls">
@@ -4284,6 +4125,7 @@ fn build_runner_top_bar(state: &CssRunnerState) -> Node {
                         </div>
                     }} else { ui! { <span /> } }}
                 </div>
+                {inline_error("solver-error", state.errors.solver.as_deref())}
             </div>
             <div class="top-bar-right">
                 <div class="layout-switcher">
@@ -4654,6 +4496,7 @@ fn build_runner_left_browser(state: &CssRunnerState) -> Node {
                                 <span class="template-meta">"2 panels · 4 seams"</span>
                             </div>
                             <span class="template-description">"Two-panel engineering fixture for MakeHuman mannequin."</span>
+                            {template_error(state, GarmentKind::Tshirt)}
                         </div>
                         <div class="template-entry pointer-item" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::LoadPreset(GarmentKind::Dress))}>
                             <div class="template-header">
@@ -4661,13 +4504,7 @@ fn build_runner_left_browser(state: &CssRunnerState) -> Node {
                                 <span class="template-meta">"2 panels · 4 seams"</span>
                             </div>
                             <span class="template-description">"Two-panel dress fixture with curved seams."</span>
-                        </div>
-                        <div class="template-entry pointer-item" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::StatusNote("Apron fixture is planned (use T-shirt or Dress)".into()))}>
-                            <div class="template-header">
-                                <span class="template-title">"Apron"</span>
-                                <span class="template-meta">"3 panels · 4 seams"</span>
-                            </div>
-                            <span class="template-description">"Workwear fixture with ties and bib."</span>
+                            {template_error(state, GarmentKind::Dress)}
                         </div>
                     </div>
                 </div>
@@ -4693,6 +4530,7 @@ fn build_runner_left_browser(state: &CssRunnerState) -> Node {
                             <button class="btn-action" onclick_shared={queue_action(&state.actions, ACT_RUN_EXPORT)}>"Export OBJ"</button>
                             <button class="btn-action btn-action-accent" onclick_shared={queue_action(&state.actions, ACT_RUN_EXPORT)}>"True-Scale SVG"</button>
                         </div>
+                        {inline_error("drawer-export-error", state.errors.export.as_deref())}
                         <div class="export-accuracy-note-box">
                             <p class="export-note-text">
                                 "Physical SVG includes stored seam allowances & sewing notches. 100 mm reference ruler verified."
@@ -4852,22 +4690,25 @@ pub fn build_runner_2d_viewport(state: &CssRunnerState) -> Node {
     } else {
         "cad-2d-pill"
     };
-    let undo_label = if state.history.can_undo() {
-        "Undo"
-    } else {
-        "Undo ·"
+    let pill = |base: &str, enabled: bool| {
+        if enabled {
+            base.to_string()
+        } else {
+            format!("{base} disabled")
+        }
     };
-    let redo_label = if state.history.can_redo() {
-        "Redo"
-    } else {
-        "Redo ·"
-    };
+    let undo_class = pill("cad-2d-pill", state.history.can_undo());
+    let redo_class = pill("cad-2d-pill", state.history.can_redo());
+    // Round, Curve and Straight act on the selected corners or boundary.
+    let has_round_target = has_selected_pts || state.selected_2d_edge.is_some();
+    let round_class = pill("cad-2d-pill primary", has_round_target);
+    let curve_class = pill("cad-2d-pill", has_round_target);
 
     let undo_btn = ui! {
-        <button id="cad-undo-btn" class="cad-2d-pill" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::Undo2d)} title="Undo (Ctrl+Z)">{undo_label}</button>
+        <button id="cad-undo-btn" class={undo_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::Undo2d)} title="Undo (Ctrl+Z)">"Undo"</button>
     };
     let redo_btn = ui! {
-        <button id="cad-redo-btn" class="cad-2d-pill" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::Redo2d)} title="Redo (Ctrl+Shift+Z)">{redo_label}</button>
+        <button id="cad-redo-btn" class={redo_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::Redo2d)} title="Redo (Ctrl+Shift+Z)">"Redo"</button>
     };
     let mode_radius_btn = ui! {
         <button id="cad-corner-radius-mode" class={radius_mode_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::SetCornerMode(true))} title="Circular fillet mode">"Radius"</button>
@@ -4894,7 +4735,7 @@ pub fn build_runner_2d_viewport(state: &CssRunnerState) -> Node {
         <button id="cad-tension-inc" class="cad-2d-pill" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::AdjustCornerTension(0.05))} title="Increase tension">"T+"</button>
     };
     let apply_round_btn = ui! {
-        <button id="cad-apply-round-btn" class="cad-2d-pill primary" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::ApplyCornerRoundSelected)} title="Round selected corner (Enter)">"Round"</button>
+        <button id="cad-apply-round-btn" class={round_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::ApplyCornerRoundSelected)} title="Round selected corner (Enter)">"Round"</button>
     };
     let rule_sharp_btn = ui! {
         <button id="cad-rule-sharp" class={sharp_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::SetCornerRule(CornerRule::Sharp))} title="Sharp independent handles">"Sharp"</button>
@@ -4906,10 +4747,10 @@ pub fn build_runner_2d_viewport(state: &CssRunnerState) -> Node {
         <button id="cad-rule-sym" class={sym_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::SetCornerRule(CornerRule::Symmetric))} title="Symmetric equal-length handles">"Sym"</button>
     };
     let curve_on_btn = ui! {
-        <button id="cad-curve-on-btn" class="cad-2d-pill" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::ToggleSelectedCurve(true))} title="Convert selected boundary/corner to cubic Bézier">"Curve"</button>
+        <button id="cad-curve-on-btn" class={curve_class.clone()} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::ToggleSelectedCurve(true))} title="Convert selected boundary/corner to cubic Bézier">"Curve"</button>
     };
     let curve_off_btn = ui! {
-        <button id="cad-curve-off-btn" class="cad-2d-pill" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::ToggleSelectedCurve(false))} title="Straighten selected boundary/corner">"Straight"</button>
+        <button id="cad-curve-off-btn" class={curve_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::ToggleSelectedCurve(false))} title="Straighten selected boundary/corner">"Straight"</button>
     };
 
     let (_vp2d_x, vp2d_w) = viewport_2d_span_x(state);
@@ -5033,6 +4874,10 @@ pub fn build_runner_2d_viewport(state: &CssRunnerState) -> Node {
                     <span class="viewport-sub">{sub_text}</span>
                 </div>
                 <div class="viewport-tools">
+                    {match measure_readout_mm(state) {
+                        Some(mm) => ui! { <span id="measure-readout" class="cad-2d-value">{format!("{mm:.1} mm")}</span> },
+                        None => ui! { <span class="hidden" /> },
+                    }}
                     <button class="viewport-tool-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_2D_ZOOM_IN)} title="Zoom In (+)">"+"</button>
                     <button class="viewport-tool-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_2D_ZOOM_OUT)} title="Zoom Out (-)">"-"</button>
                     <button class="viewport-tool-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_2D_FIT)} title="Fit Board (0)">"Fit"</button>
@@ -5044,8 +4889,31 @@ pub fn build_runner_2d_viewport(state: &CssRunnerState) -> Node {
                 <svg id="svg-2d-board" viewBox={view_box} preserveAspectRatio="xMidYMid meet" width={svg_w} height={svg_h} class="svg-2d-board">
                     {svg_nodes}
                 </svg>
+                {match &state.errors.board {
+                    Some(message) => ui! { <span id="board-error" class="inline-error board-error">{message.clone()}</span> },
+                    None => ui! { <span class="hidden" /> },
+                }}
             </div>
         </div>
+    }
+}
+
+/// Distance shown by the 2D Measure tool: the committed measurement, or the
+/// live distance to the pointer while the second point is being placed.
+pub fn measure_readout_mm(state: &CssRunnerState) -> Option<f64> {
+    match &state.draft_2d {
+        Some(ToolDraft2d::Measure {
+            second_board_m: Some(_),
+            last_distance_mm,
+            ..
+        }) => *last_distance_mm,
+        Some(ToolDraft2d::Measure {
+            first_board_m: Some(first),
+            second_board_m: None,
+            hover_board_m: Some(hover),
+            ..
+        }) => Some(first.distance(*hover) * 1000.0),
+        _ => None,
     }
 }
 
@@ -5191,9 +5059,16 @@ fn build_cat_sewing(state: &CssRunnerState) -> Node {
     for (idx, s) in seams.iter().enumerate() {
         let label = format!("{}: {} ↔ {}", s.id, s.a.panel, s.b.panel);
         let rev_badge = if s.reverse_b { " (rev)" } else { "" };
+        let ease = match seam_ease_m(&state.project.template, &state.scene.garment, &s.id) {
+            Some(ease_m) => ui! {
+                <span class="seam-ease">{format!("ease {:.1} mm", ease_m * 1e3)}</span>
+            },
+            None => ui! { <span class="hidden" /> },
+        };
         seam_rows.push(ui! {
             <div class="tree-item">
                 <span>{label}</span>
+                {ease}
                 <span class="badge-accent">{format!("#{idx}{rev_badge}")}</span>
             </div>
         });
@@ -5447,7 +5322,12 @@ fn build_runner_property_accordions(state: &CssRunnerState) -> Node {
                 m.residual_rms_n
                     .map_or("N/A".into(), |r| format!("{r:.1e}"))
             },
-            |al| format!("{:.1e} N max", al.original_force_max_n),
+            |al| {
+                format!(
+                    "{:.1e} N max, gap {:.1e} m",
+                    al.original_force_max_n, al.primal_m
+                )
+            },
         )
     });
 
@@ -5517,6 +5397,7 @@ fn build_runner_property_accordions(state: &CssRunnerState) -> Node {
     };
     let sel_pts = effective_selected_points(state);
     let has_sel_pts = !sel_pts.is_empty();
+    let has_round_target = has_sel_pts || state.selected_2d_edge.is_some();
     let corner_menu_active =
         state.active_2d_tool == "Corner" || (state.corner_preview_active && has_sel_pts);
     let corner_menu_box_class = if corner_menu_active {
@@ -5655,44 +5536,6 @@ fn build_runner_property_accordions(state: &CssRunnerState) -> Node {
         "cad-prop-btn"
     };
 
-    let sew_confirm_card = match &state.draft_2d {
-        Some(ToolDraft2d::SewConfirm {
-            a,
-            b,
-            a_len_m,
-            b_len_m,
-        }) => {
-            let equal = sew_lengths_equal(*a_len_m, *b_len_m);
-            let difference = format!("{:.1} mm", (a_len_m - b_len_m).abs() * 1e3);
-            let (confirm_label, confirm_ease) = if equal {
-                ("Sew", false)
-            } else {
-                ("Sew with easing", true)
-            };
-            ui! {
-                <div id="sew-confirm-card" class="card sew-confirm-card">
-                    <div class="prop-row">
-                        <span class="prop-label">{format!("{}.{}", a.0, a.1)}</span>
-                        <span class="prop-value">{format!("{:.1} mm", a_len_m * 1e3)}</span>
-                    </div>
-                    <div class="prop-row">
-                        <span class="prop-label">{format!("{}.{}", b.0, b.1)}</span>
-                        <span class="prop-value">{format!("{:.1} mm", b_len_m * 1e3)}</span>
-                    </div>
-                    <div class="prop-row">
-                        <span class="prop-label">"Length difference"</span>
-                        <span class="prop-value">{if equal { "None".to_string() } else { difference }}</span>
-                    </div>
-                    <div class="quick-actions-row">
-                        <button id="btn-sew-confirm" class="btn-action btn-action-accent" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::ConfirmSew { ease: confirm_ease })}>{confirm_label}</button>
-                        <button id="btn-sew-cancel" class="btn-action" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::CancelSew)}>"Cancel"</button>
-                    </div>
-                </div>
-            }
-        }
-        _ => ui! { <span class="hidden" /> },
-    };
-
     let acc_line = ui! {
         <div class={if open_1 { "accordion open" } else { "accordion collapsed" }}>
             <button class="accordion-header" onclick_shared={queue_action(&state.actions, ACT_RUN_ACC_1)}>
@@ -5702,7 +5545,6 @@ fn build_runner_property_accordions(state: &CssRunnerState) -> Node {
             {if open_1 {
                 ui! {
                     <div class="accordion-content">
-                        {sew_confirm_card}
                         <div class="prop-row">
                             <span class="prop-label">"2D Selection"</span>
                             <span class="prop-value">{sel_info.0}</span>
@@ -5748,9 +5590,9 @@ fn build_runner_property_accordions(state: &CssRunnerState) -> Node {
                                 <button class={rule_sym_btn} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::SetCornerRule(CornerRule::Symmetric))}>"Sym"</button>
                             </div>
                             <div class="cad-prop-actions">
-                                <button id="prop-apply-round" class="cad-prop-btn primary" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::ApplyCornerRoundSelected)}>{format!("Round ({:.0} mm)", state.corner_radius_mm)}</button>
-                                <button class="cad-prop-btn" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::ToggleSelectedCurve(true))}>"To Bézier"</button>
-                                <button class="cad-prop-btn" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::ToggleSelectedCurve(false))}>"To Straight"</button>
+                                <button id="prop-apply-round" class={if has_round_target { "cad-prop-btn primary" } else { "cad-prop-btn primary disabled" }} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::ApplyCornerRoundSelected)}>{format!("Round ({:.0} mm)", state.corner_radius_mm)}</button>
+                                <button class={if has_round_target { "cad-prop-btn" } else { "cad-prop-btn disabled" }} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::ToggleSelectedCurve(true))}>"To Bézier"</button>
+                                <button class={if has_round_target { "cad-prop-btn" } else { "cad-prop-btn disabled" }} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::ToggleSelectedCurve(false))}>"To Straight"</button>
                             </div>
                         </div>
                     </div>
@@ -5905,12 +5747,8 @@ fn build_runner_property_accordions(state: &CssRunnerState) -> Node {
 
 fn build_runner_status_bar(state: &CssRunnerState) -> Node {
     let step_info = format!(
-        "Step: {} | Worker: {:.1} ms | Status: {} | Tool: {} / {}",
-        state.step_count,
-        state.step_ms,
-        state.status_message,
-        state.active_3d_tool,
-        state.active_2d_tool
+        "Step: {} | Worker: {:.1} ms | Tool: {} / {}",
+        state.step_count, state.step_ms, state.active_3d_tool, state.active_2d_tool
     );
     let mesh_info = format!(
         "Cloth: {} verts, {} tris | Avatar: {} tris",
@@ -6780,30 +6618,24 @@ pub fn render_runner_2d_svg(state: &CssRunnerState) -> (Vec<Node>, String) {
                     });
                 }
             }
-            ToolDraft2d::Sew { .. } | ToolDraft2d::SewConfirm { .. } => {
-                let pending: Vec<&(String, String)> = match draft {
-                    ToolDraft2d::Sew { first_edge } => first_edge.iter().collect(),
-                    ToolDraft2d::SewConfirm { a, b, .. } => vec![a, b],
-                    _ => Vec::new(),
-                };
-                for (pid, ename) in pending {
-                    if let Some(pg) = panel_geos.iter().find(|g| &g.id == pid)
-                        && let Some(eidx) = pg.edge_names.iter().position(|e| e == ename)
-                    {
-                        let (ax, ay) = pg.points[eidx];
-                        let (bx, by) = pg.points[(eidx + 1) % pg.points.len()];
-                        let seg_d = if let Some(c) = pg.curves.iter().find(|c| c.edge_idx == eidx) {
-                            format!(
-                                "M {ax:.2},{ay:.2} C {:.2},{:.2} {:.2},{:.2} {bx:.2},{by:.2}",
-                                c.c1.0, c.c1.1, c.c2.0, c.c2.1
-                            )
-                        } else {
-                            format!("M {ax:.2},{ay:.2} L {bx:.2},{by:.2}")
-                        };
-                        nodes.push(ui! {
+            ToolDraft2d::Sew { first_edge } => {
+                if let Some((pid, ename)) = first_edge
+                    && let Some(pg) = panel_geos.iter().find(|g| &g.id == pid)
+                    && let Some(eidx) = pg.edge_names.iter().position(|e| e == ename)
+                {
+                    let (ax, ay) = pg.points[eidx];
+                    let (bx, by) = pg.points[(eidx + 1) % pg.points.len()];
+                    let seg_d = if let Some(c) = pg.curves.iter().find(|c| c.edge_idx == eidx) {
+                        format!(
+                            "M {ax:.2},{ay:.2} C {:.2},{:.2} {:.2},{:.2} {bx:.2},{by:.2}",
+                            c.c1.0, c.c1.1, c.c2.0, c.c2.1
+                        )
+                    } else {
+                        format!("M {ax:.2},{ay:.2} L {bx:.2},{by:.2}")
+                    };
+                    nodes.push(ui! {
                             <path d={seg_d} fill="none" stroke={accent_gold} stroke-width={format!("{:.2}", 3.2 * px)} class="tool-draft-sew" />
                         });
-                    }
                 }
             }
             ToolDraft2d::InternalLine {
@@ -6892,7 +6724,7 @@ pub fn create_runner_app<'a>(
     let usd_scene = cssimpler::renderer::gpu::usd::UsdScene::open(&preview_path)
         .expect("load generated USD viewport scene");
     if let Err(err) = marvelous_cloth::usd_scene::init_viewport_camera(&usd_scene, &state.camera) {
-        state.status_message = format!("USD camera init error: {err}");
+        eprintln!("USD camera init error: {err}");
     }
     state.usd_scene = Some(usd_scene.clone());
 
@@ -7397,11 +7229,21 @@ mod tests {
         assert_eq!(read_points(app.state()), initial_points);
 
         // Native USD hosts are hidden if later text paint overlaps their area.
-        // Check expanded diagnostics as well as Ready, across window sizes.
+        // Check with no errors and with every inline error slot filled by a
+        // long message, across window sizes.
+        let long =
+            "Permission denied (os error 13) while replacing /home/user/projects/garment.json";
+        let all_errors = InlineErrors {
+            save: Some(long.into()),
+            export: Some(long.into()),
+            solver: Some(long.into()),
+            template: Some((GarmentKind::Tshirt, long.into())),
+            board: Some(long.into()),
+        };
         for (width, height) in [(1600, 980), (1280, 800), (1024, 768), (800, 600)] {
             app.set_viewport(cssimpler::renderer::ViewportSize::new(width, height));
-            for message in ["Ready", "Step 124: min dist 0.124 mm, res 0.0e0, 65.2 ms"] {
-                app.state_mut().status_message = message.into();
+            for errors in [InlineErrors::default(), all_errors.clone()] {
+                app.state_mut().errors = errors;
                 let roots = app.frame(FrameInfo {
                     delta: Duration::from_millis(16),
                     frame_index: 4,
@@ -7779,8 +7621,8 @@ mod tests {
             .curves[&curve_name][0];
         assert!(
             updated_c1.distance(initial_c1) > 1e-4,
-            "dragging Bézier handle must modify control point (initial={initial_c1:?}, updated={updated_c1:?}, status={:?})",
-            state.status_message
+            "dragging Bézier handle must modify control point (initial={initial_c1:?}, updated={updated_c1:?}, error={:?})",
+            state.errors.board
         );
 
         // 7. Undo restores pre-drag handle and pre-round corner; Redo brings them back
@@ -8281,12 +8123,19 @@ mod tests {
         handle_runner_event(&mut state, &pointer_move_ev(m1x, m1y));
         let (svg_msr, _) = render_runner_2d_svg(&state);
         assert!(count_class(&svg_msr, "tool-draft-measure") >= 1);
+        let live_mm = measure_readout_mm(&state).expect("live distance while placing");
         assert!(handle_runner_event(&mut state, &pointer_btn_ev(true)));
         assert!(handle_runner_event(&mut state, &pointer_btn_ev(false)));
-        assert!(state.status_message.contains("mm"));
+        // The measured distance is a value in the 2D header, not a message.
+        let measured_mm = measure_readout_mm(&state).expect("measured distance");
+        assert!(measured_mm > 0.0 && (measured_mm - live_mm).abs() < 1.0);
+        assert!(
+            format!("{:?}", build_runner_2d_viewport(&state))
+                .contains(&format!("{measured_mm:.1} mm"))
+        );
 
-        // 6. Sew tool: click first edge on rect panel and second edge on pen panel -> pending
-        //    confirmation; the seam exists only after an explicit confirm.
+        // 6. Sew tool: click first edge on rect panel and second edge on pen panel; the
+        //    second click commits the seam with no confirmation step.
         let seams_before = state.project.template.seams.len();
         set_active_2d_tool(&mut state, "Sew");
         let p_rect = state.project.template.panels[initial_panels]
@@ -8316,21 +8165,7 @@ mod tests {
         handle_runner_event(&mut state, &pointer_move_ev(spx, spy));
         assert!(handle_runner_event(&mut state, &pointer_btn_ev(true)));
         assert!(handle_runner_event(&mut state, &pointer_btn_ev(false)));
-        assert_eq!(state.project.template.seams.len(), seams_before);
-        let Some(ToolDraft2d::SewConfirm {
-            a_len_m, b_len_m, ..
-        }) = state.draft_2d.clone()
-        else {
-            panic!("second pick must wait for confirmation");
-        };
-        let (svg_sew, _) = render_runner_2d_svg(&state);
-        assert!(count_class(&svg_sew, "tool-draft-sew") >= 2);
-        apply_runner_ui_op(
-            &mut state,
-            RunnerUiOp::ConfirmSew {
-                ease: !sew_lengths_equal(a_len_m, b_len_m),
-            },
-        );
+        assert!(state.draft_2d.is_none(), "{:?}", state.errors.board);
         assert_eq!(state.project.template.seams.len(), seams_before + 1);
 
         // 7. Trim tool: click internal line on panel 0 -> removes it
