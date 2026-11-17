@@ -562,6 +562,35 @@ impl GarmentTemplate {
         Ok(out)
     }
 
+    /// This template with every non-physical field cleared: mirror links,
+    /// fabric appearance, graphics, trims, 2D layout and rotation, and the
+    /// polygon draft data (target lengths, seam allowances, notches and
+    /// measurements). Two templates with equal projections drape identically.
+    ///
+    /// `authoring::same_physics` (may an edit keep the drape?) and the fitting
+    /// cache signature (is a saved drape still valid?) both use this, so the
+    /// two cannot disagree. A new draft-only field belongs here.
+    pub fn physical_projection(&self) -> Self {
+        let mut t = self.clone();
+        t.mirror_links.clear();
+        t.fabric_appearance.clear();
+        t.graphics.clear();
+        t.trims.clear();
+        for p in &mut t.panels {
+            p.layout_2d = None;
+            p.layout_rotation_degrees = 0.;
+            if let Some(polygon) = p.polygon.as_mut() {
+                // A required boundary length is a 2D specification, not rest
+                // geometry, and markings never enter the mesh or the solver.
+                polygon.target_lengths.clear();
+                polygon.seam_allowances.clear();
+                polygon.notches.clear();
+                polygon.measurements.clear();
+            }
+        }
+        t
+    }
+
     /// Deterministic small fixture: 3x4 and 4x7 cells, independent 3D placements.
     pub fn two_panel_demo() -> Self {
         let properties = FabricProperties::default();
