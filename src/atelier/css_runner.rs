@@ -1369,6 +1369,53 @@ fn sample_polygon_boundary(poly: &PolygonPattern) -> Vec<DVec2> {
     ring
 }
 
+/// Rest-geometry size of a pattern piece, in metres, measured on the sampled
+/// boundary so curved edges count: bounding-box width and height, cut area
+/// (outer contour minus holes) and outer contour length.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PanelExtent {
+    pub width_m: f64,
+    pub height_m: f64,
+    pub area_m2: f64,
+    pub perimeter_m: f64,
+}
+
+pub fn panel_extent(panel: &Panel) -> PanelExtent {
+    let Some(poly) = &panel.polygon else {
+        let (w, h) = (panel.pattern.width, panel.pattern.height);
+        return PanelExtent {
+            width_m: w,
+            height_m: h,
+            area_m2: w * h,
+            perimeter_m: 2.0 * (w + h),
+        };
+    };
+    let ring = sample_polygon_boundary(poly);
+    let (min, max) = ring.iter().fold(
+        (DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY)),
+        |(lo, hi), p| (lo.min(*p), hi.max(*p)),
+    );
+    let size = if ring.is_empty() {
+        DVec2::ZERO
+    } else {
+        max - min
+    };
+    let holes: f64 = poly
+        .holes
+        .iter()
+        .map(|h| marvelous_cloth::garment::domain::area(&h.points).abs())
+        .sum();
+    let perimeter_m = (0..ring.len())
+        .map(|i| ring[i].distance(ring[(i + 1) % ring.len()]))
+        .sum();
+    PanelExtent {
+        width_m: size.x,
+        height_m: size.y,
+        area_m2: marvelous_cloth::garment::domain::area(&ring).abs() - holes,
+        perimeter_m,
+    }
+}
+
 fn panel_edge_length_m(panel: &Panel, edge_name: &str) -> Option<f64> {
     let poly = panel.polygon.as_ref()?;
     let idx = poly.edges.iter().position(|e| e == edge_name)?;
@@ -4589,32 +4636,8 @@ pub fn build_runner_2d_viewport(state: &CssRunnerState) -> Node {
     let selected_panel = panels.get(state.selected_piece_index);
     let selected_name = selected_panel.map_or("None", |p| p.name.as_str());
     let (w_mm, h_mm) = selected_panel.map_or((0.0, 0.0), |p| {
-        let (w, h) = if let Some(poly) = &p.polygon {
-            let min_x = poly
-                .points
-                .iter()
-                .map(|pt| pt.x)
-                .fold(f64::INFINITY, f64::min);
-            let max_x = poly
-                .points
-                .iter()
-                .map(|pt| pt.x)
-                .fold(f64::NEG_INFINITY, f64::max);
-            let min_y = poly
-                .points
-                .iter()
-                .map(|pt| pt.y)
-                .fold(f64::INFINITY, f64::min);
-            let max_y = poly
-                .points
-                .iter()
-                .map(|pt| pt.y)
-                .fold(f64::NEG_INFINITY, f64::max);
-            (max_x - min_x, max_y - min_y)
-        } else {
-            (p.pattern.width, p.pattern.height)
-        };
-        (w * 1000.0, h * 1000.0)
+        let e = panel_extent(p);
+        (e.width_m * 1000.0, e.height_m * 1000.0)
     });
 
     let zoom_pct = (state.board_2d_zoom * 100.0).round() as i32;
@@ -4971,7 +4994,6 @@ fn build_runner_right_dock(state: &CssRunnerState) -> Node {
     ui! {
         <aside id="right-dock" class="sidebar right-object-browser-panel">
             <div id="object-browser">
-                <div class="dock-section-title">"Object Browser"</div>
                 <div class="dock-tabs">
                     <button class={tp} onclick_shared={queue_action(&state.actions, ACT_RUN_TAB_PATTERN)}>"2D Pattern"</button>
                     <button class={ts} onclick_shared={queue_action(&state.actions, ACT_RUN_TAB_SEWING)}>"Sewing"</button>
@@ -4984,7 +5006,6 @@ fn build_runner_right_dock(state: &CssRunnerState) -> Node {
                 </div>
             </div>
             <div id="property-editor">
-                <div class="dock-section-title">"Property Editor"</div>
                 {build_runner_property_accordions(state)}
             </div>
         </aside>
@@ -4994,10 +5015,6 @@ fn build_runner_right_dock(state: &CssRunnerState) -> Node {
 fn build_cat_pattern_2d(state: &CssRunnerState) -> Node {
     let panels = &state.project.template.panels;
     let connected = compute_connected_2d_highlight(state);
-    let selected = panels.get(state.selected_piece_index);
-    let name = selected.map_or("None", |p| p.id.as_str());
-    let fabric = selected.map_or("Default", |p| p.fabric.as_str());
-    let grain = selected.map_or(0.0, |p| p.grain_degrees);
     let count = panels.len();
 
     let mut piece_rows = Vec::new();
@@ -5027,22 +5044,9 @@ fn build_cat_pattern_2d(state: &CssRunnerState) -> Node {
 
     ui! {
         <div class="tab-panel">
-            <h3 class="panel-heading">"Pattern Pieces"</h3>
             <div class="prop-row">
                 <span class="prop-label">"Total Pieces"</span>
                 <span class="prop-value">{format!("{count}")}</span>
-            </div>
-            <div class="prop-row">
-                <span class="prop-label">"Selected ID"</span>
-                <span class="prop-value">{name}</span>
-            </div>
-            <div class="prop-row">
-                <span class="prop-label">"Fabric Preset"</span>
-                <span class="prop-value">{fabric}</span>
-            </div>
-            <div class="prop-row">
-                <span class="prop-label">"Grain Angle"</span>
-                <span class="prop-value">{format!("{grain:.1}°")}</span>
             </div>
             <div class="browser-tree browser-tree-spaced">
                 {piece_rows}
@@ -5076,14 +5080,9 @@ fn build_cat_sewing(state: &CssRunnerState) -> Node {
 
     ui! {
         <div class="tab-panel">
-            <h3 class="panel-heading">"Sewing Seams"</h3>
             <div class="prop-row">
                 <span class="prop-label">"Total Seams"</span>
                 <span class="prop-value">{format!("{seams_count}")}</span>
-            </div>
-            <div class="prop-row">
-                <span class="prop-label">"Active Tool"</span>
-                <span class="prop-value">{state.active_2d_tool.clone()}</span>
             </div>
             <div class="browser-tree browser-tree-spaced">
                 {seam_rows}
@@ -5105,7 +5104,6 @@ fn build_cat_form_3d(state: &CssRunnerState) -> Node {
 
     ui! {
         <div class="tab-panel">
-            <h3 class="panel-heading">"3D Form & Positioning"</h3>
             <div class="prop-row">
                 <span class="prop-label">"Garment Vertices"</span>
                 <span class="prop-value">{format!("{verts}")}</span>
@@ -5117,10 +5115,6 @@ fn build_cat_form_3d(state: &CssRunnerState) -> Node {
             <div class="prop-row">
                 <span class="prop-label">"Pinned Points"</span>
                 <span class="prop-value">{format!("{pins_count}")}</span>
-            </div>
-            <div class="prop-row">
-                <span class="prop-label">"Active 3D Tool"</span>
-                <span class="prop-value">{state.active_3d_tool.clone()}</span>
             </div>
         </div>
     }
@@ -5143,7 +5137,6 @@ fn build_cat_material(state: &CssRunnerState) -> Node {
 
     ui! {
         <div class="tab-panel">
-            <h3 class="panel-heading">"Fabric & Appearance"</h3>
             <div class="prop-row">
                 <span class="prop-label">"Defined Fabrics"</span>
                 <span class="prop-value">{format!("{fabrics_count}")}</span>
@@ -5151,10 +5144,6 @@ fn build_cat_material(state: &CssRunnerState) -> Node {
             <div class="prop-row">
                 <span class="prop-label">"Materials Bound"</span>
                 <span class="prop-value">{format!("{mat_count}")}</span>
-            </div>
-            <div class="prop-row">
-                <span class="prop-label">"Albedo Maps"</span>
-                <span class="prop-value">"Portable Linear-Light"</span>
             </div>
             <div class="browser-tree browser-tree-spaced">
                 {fabric_rows}
@@ -5169,7 +5158,6 @@ fn build_cat_environment(state: &CssRunnerState) -> Node {
 
     ui! {
         <div class="tab-panel">
-            <h3 class="panel-heading">"Avatar & Environment"</h3>
             <div class="prop-row">
                 <span class="prop-label">"Avatar Triangles"</span>
                 <span class="prop-value">{format!("{avatar_tris}")}</span>
@@ -5178,28 +5166,20 @@ fn build_cat_environment(state: &CssRunnerState) -> Node {
                 <span class="prop-label">"Contact Clearance"</span>
                 <span class="prop-value">{clearance_mm}</span>
             </div>
-            <div class="prop-row">
-                <span class="prop-label">"Profiles Store"</span>
-                <span class="prop-value">"workspace-profiles.json"</span>
-            </div>
-            <div class="prop-row">
-                <span class="prop-label">"Status"</span>
-                <span class="prop-value">"Synced"</span>
-            </div>
         </div>
     }
 }
 
 /// Label/value rows for the Fabric Mechanics accordion, read from the
 /// selected panel's fabric in the document (SI values, with g/m² and mm shown
-/// for readability). Returns a single explanatory row instead of defaults when
-/// no panel is selected or the panel names a fabric the template lacks.
+/// for readability). No rows when no panel is selected; a single error row
+/// when the panel names a fabric the template lacks.
 pub fn fabric_mechanics_rows(
     template: &GarmentTemplate,
     selected_panel: usize,
 ) -> Vec<(&'static str, String)> {
     let Some(panel) = template.panels.get(selected_panel) else {
-        return vec![("Fabric", "No panel selected".to_string())];
+        return Vec::new();
     };
     let Some(fabric) = template.fabrics.iter().find(|f| f.id == panel.fabric) else {
         return vec![("Fabric", format!("Unknown fabric id '{}'", panel.fabric))];
@@ -5259,10 +5239,7 @@ mod fabric_mechanics_tests {
         );
         assert_ne!(first, second, "different fabrics must render differently");
 
-        assert_eq!(
-            fabric_mechanics_rows(&template, template.panels.len()),
-            vec![("Fabric", "No panel selected".to_string())]
-        );
+        assert!(fabric_mechanics_rows(&template, template.panels.len()).is_empty());
         template.panels[0].fabric = "missing".into();
         assert_eq!(
             fabric_mechanics_rows(&template, 0),
@@ -5271,64 +5248,189 @@ mod fabric_mechanics_tests {
     }
 }
 
+/// Label/value rows; an empty list renders nothing.
+fn prop_rows(rows: Vec<(&'static str, String)>) -> Vec<Node> {
+    rows.into_iter()
+        .map(|(label, value)| {
+            ui! {
+                <div class="prop-row">
+                    <span class="prop-label">{label}</span>
+                    <span class="prop-value">{value}</span>
+                </div>
+            }
+        })
+        .collect()
+}
+
+/// Piece Information rows for one panel, from its sampled rest boundary.
+pub fn piece_information_rows(panel: &Panel) -> Vec<(&'static str, String)> {
+    let e = panel_extent(panel);
+    vec![
+        ("Name", panel.name.clone()),
+        ("ID", panel.id.clone()),
+        ("Width", format!("{:.1} mm", e.width_m * 1e3)),
+        ("Height", format!("{:.1} mm", e.height_m * 1e3)),
+        ("Area", format!("{:.2} dm²", e.area_m2 * 1e2)),
+        ("Perimeter", format!("{:.1} mm", e.perimeter_m * 1e3)),
+    ]
+}
+
+/// Simulation Diagnostics rows. Only measured values appear: nothing before
+/// the first accepted step, and no residual row when the solver reports none.
+pub fn simulation_diagnostics_rows(state: &CssRunnerState) -> Vec<(&'static str, String)> {
+    let Some(m) = &state.last_metrics else {
+        return Vec::new();
+    };
+    let mut rows = vec![("Solver Step Time", format!("{:.2} ms", state.step_ms))];
+    let residual = match (&m.barrier_al, m.residual_rms_n) {
+        (Some(al), _) => Some(format!(
+            "{:.1e} N max, gap {:.1e} m",
+            al.original_force_max_n, al.primal_m
+        )),
+        (None, Some(r)) => Some(format!("{r:.1e} N RMS")),
+        (None, None) => None,
+    };
+    if let Some(residual) = residual {
+        rows.push(("Force Residual", residual));
+    }
+    rows.push((
+        "Minimum Detected Gap",
+        format!("{:.2} mm", m.minimum_distance_m * 1e3),
+    ));
+    rows
+}
+
+#[cfg(test)]
+mod property_value_tests {
+    use super::*;
+
+    fn panel_with(points: &[(f64, f64)]) -> Panel {
+        let mut panel = FittingProject::basic(GarmentKind::Tshirt, 1, "unused.obj".into())
+            .template
+            .panels
+            .remove(0);
+        let poly = panel.polygon.as_mut().expect("bundled panels are polygons");
+        poly.points = points.iter().map(|&(x, y)| DVec2::new(x, y)).collect();
+        poly.edges = (0..points.len()).map(|i| format!("e{i}")).collect();
+        poly.curves.clear();
+        poly.holes.clear();
+        panel
+    }
+
+    fn close(a: f64, b: f64, tol: f64) -> bool {
+        (a - b).abs() <= tol
+    }
+
+    #[test]
+    fn extent_is_measured_on_the_real_outline_not_its_bounding_box() {
+        // Right triangle 400 × 300 mm: the old bounding-box formula reported
+        // 1200 cm² and 1400 mm; the true values are half the area and 1200 mm.
+        let tri = panel_extent(&panel_with(&[(0.0, 0.0), (0.4, 0.0), (0.0, 0.3)]));
+        assert!(close(tri.width_m, 0.4, 1e-12) && close(tri.height_m, 0.3, 1e-12));
+        assert!(close(tri.area_m2, 0.06, 1e-12), "{tri:?}");
+        assert!(close(tri.perimeter_m, 1.2, 1e-12), "{tri:?}");
+
+        // A hole is cut out of the area but not added to the outer contour.
+        let mut holed = panel_with(&[(0.0, 0.0), (0.4, 0.0), (0.4, 0.3), (0.0, 0.3)]);
+        holed
+            .polygon
+            .as_mut()
+            .unwrap()
+            .holes
+            .push(marvelous_cloth::garment::domain::Hole {
+                points: vec![
+                    DVec2::new(0.1, 0.1),
+                    DVec2::new(0.1, 0.2),
+                    DVec2::new(0.2, 0.2),
+                    DVec2::new(0.2, 0.1),
+                ],
+                edges: (0..4).map(|i| format!("h{i}")).collect(),
+            });
+        let e = panel_extent(&holed);
+        assert!(close(e.area_m2, 0.12 - 0.01, 1e-12), "{e:?}");
+        assert!(close(e.perimeter_m, 1.4, 1e-12), "{e:?}");
+
+        // A cubic bulge below the bottom edge (controls 100 mm out, evenly
+        // spaced) adds 0.2·d = 0.02 m² and 0.75·d = 75 mm of height. The old
+        // formula only saw the corner points.
+        let mut curved = panel_with(&[(0.0, 0.0), (0.4, 0.0), (0.4, 0.3), (0.0, 0.3)]);
+        curved
+            .polygon
+            .as_mut()
+            .unwrap()
+            .curves
+            .insert("e0".into(), [DVec2::new(0.1, -0.1), DVec2::new(0.3, -0.1)]);
+        let e = panel_extent(&curved);
+        assert!(close(e.height_m, 0.375, 1e-3), "{e:?}");
+        assert!(close(e.area_m2, 0.14, 1e-3), "{e:?}");
+        assert!(e.perimeter_m > 1.4 + 0.02, "{e:?}");
+
+        let rows = piece_information_rows(&panel_with(&[(0.0, 0.0), (0.4, 0.0), (0.0, 0.3)]));
+        let value = |label: &str| rows.iter().find(|(l, _)| *l == label).unwrap().1.clone();
+        assert_eq!(value("Area"), "6.00 dm²");
+        assert_eq!(value("Perimeter"), "1200.0 mm");
+    }
+
+    #[test]
+    fn diagnostics_show_only_measured_values() {
+        let _guard = worker::WORKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let avatar = dir.path().join("avatar.obj");
+        std::fs::write(&avatar, "v 0 0 -10\nv 1 0 -10\nv 0 1 -10\nf 1 2 3\n")
+            .expect("write avatar");
+        let project = FittingProject::basic(GarmentKind::Tshirt, 1, avatar);
+        let scene = project.compile().expect("compile scene");
+        let files = DocumentFiles {
+            output: dir.path().join("out"),
+            source: None,
+            modified: false,
+        };
+        let (tx, latest) = worker::start_cpu().expect("start cpu worker");
+        let mut state = CssRunnerState::new(project, scene, files, tx, latest);
+
+        // Before any accepted step there is nothing measured to show.
+        assert!(simulation_diagnostics_rows(&state).is_empty());
+
+        state.step_ms = 4.25;
+        state.last_metrics = Some(VbdMetrics {
+            minimum_distance_m: 0.0031,
+            residual_rms_n: None,
+            ..Default::default()
+        });
+        let rows = simulation_diagnostics_rows(&state);
+        assert_eq!(
+            rows,
+            vec![
+                ("Solver Step Time", "4.25 ms".to_string()),
+                ("Minimum Detected Gap", "3.10 mm".to_string()),
+            ],
+            "no residual row when the solver reports none"
+        );
+
+        state.last_metrics.as_mut().unwrap().residual_rms_n = Some(2.5e-3);
+        let rows = simulation_diagnostics_rows(&state);
+        assert!(rows.contains(&("Force Residual", "2.5e-3 N RMS".to_string())));
+    }
+}
+
 fn build_runner_property_accordions(state: &CssRunnerState) -> Node {
     let panels = &state.project.template.panels;
     let selected_panel = panels.get(state.selected_piece_index);
-    let selected_name = selected_panel.map_or("None", |p| p.name.as_str());
-    let selected_id = selected_panel.map_or("none", |p| p.id.as_str());
-
-    let (width_mm, height_mm) = if let Some(p) = selected_panel {
-        if let Some(ref poly) = p.polygon {
-            let min_x = poly
-                .points
-                .iter()
-                .map(|pt| pt.x)
-                .fold(f64::INFINITY, f64::min);
-            let max_x = poly
-                .points
-                .iter()
-                .map(|pt| pt.x)
-                .fold(f64::NEG_INFINITY, f64::max);
-            let min_y = poly
-                .points
-                .iter()
-                .map(|pt| pt.y)
-                .fold(f64::INFINITY, f64::min);
-            let max_y = poly
-                .points
-                .iter()
-                .map(|pt| pt.y)
-                .fold(f64::NEG_INFINITY, f64::max);
-            ((max_x - min_x) * 1000.0, (max_y - min_y) * 1000.0)
-        } else {
-            (p.pattern.width * 1000.0, p.pattern.height * 1000.0)
-        }
-    } else {
-        (0.0, 0.0)
-    };
-
-    let area_dm2 = (width_mm * height_mm) / 10000.0;
-    let perimeter_mm = (width_mm + height_mm) * 2.0;
-
-    let last_pen = state
-        .last_metrics
-        .as_ref()
-        .map_or("0.00 mm".to_string(), |m| {
-            format!("{:.2} mm", m.minimum_distance_m * 1000.0)
-        });
-    let last_res = state.last_metrics.as_ref().map_or("N/A".to_string(), |m| {
-        m.barrier_al.as_ref().map_or_else(
-            || {
-                m.residual_rms_n
-                    .map_or("N/A".into(), |r| format!("{r:.1e}"))
-            },
-            |al| {
-                format!(
-                    "{:.1e} N max, gap {:.1e} m",
-                    al.original_force_max_n, al.primal_m
-                )
-            },
-        )
+    let info_rows = selected_panel.map_or_else(Vec::new, piece_information_rows);
+    let diagnostics_rows = simulation_diagnostics_rows(state);
+    let arrange_rows = selected_panel.map_or_else(Vec::new, |p| {
+        let (t, r) = (p.placement.translation, p.placement.rotation_degrees);
+        vec![
+            ("Translation X", format!("{:.1} cm", t.x * 100.0)),
+            ("Translation Y", format!("{:.1} cm", t.y * 100.0)),
+            ("Translation Z", format!("{:.1} cm", t.z * 100.0)),
+            (
+                "Rotation (X/Y/Z)",
+                format!("{:.0}°/{:.0}°/{:.0}°", r.x, r.y, r.z),
+            ),
+        ]
     });
 
     let pins_count = selected_panel.map_or(0, |p| p.pins.len() + p.pin_points.len());
@@ -5344,36 +5446,13 @@ fn build_runner_property_accordions(state: &CssRunnerState) -> Node {
     let acc_info = ui! {
         <div class={if open_0 { "accordion open" } else { "accordion collapsed" }}>
             <button class="accordion-header" onclick_shared={queue_action(&state.actions, ACT_RUN_ACC_0)}>
-                <span>"1. Piece Information"</span>
+                <span>"Piece Information"</span>
                 {if open_0 { icon_chevron_down() } else { icon_chevron_right() }}
             </button>
             {if open_0 {
                 ui! {
                     <div class="accordion-content">
-                        <div class="prop-row">
-                            <span class="prop-label">"Name"</span>
-                            <span class="prop-value">{selected_name}</span>
-                        </div>
-                        <div class="prop-row">
-                            <span class="prop-label">"ID"</span>
-                            <span class="prop-value">{selected_id}</span>
-                        </div>
-                        <div class="prop-row">
-                            <span class="prop-label">"Width"</span>
-                            <span class="prop-value">{format!("{width_mm:.1} mm")}</span>
-                        </div>
-                        <div class="prop-row">
-                            <span class="prop-label">"Height"</span>
-                            <span class="prop-value">{format!("{height_mm:.1} mm")}</span>
-                        </div>
-                        <div class="prop-row">
-                            <span class="prop-label">"Area"</span>
-                            <span class="prop-value">{format!("{area_dm2:.2} dm²")}</span>
-                        </div>
-                        <div class="prop-row">
-                            <span class="prop-label">"Perimeter"</span>
-                            <span class="prop-value">{format!("{perimeter_mm:.1} mm")}</span>
-                        </div>
+                        {prop_rows(info_rows)}
                     </div>
                 }
             } else {
@@ -5385,16 +5464,6 @@ fn build_runner_property_accordions(state: &CssRunnerState) -> Node {
     // Accordion 1: Selected Line, Corner & Seam Allowance
     let template = state.active_template();
     let connected = compute_connected_2d_highlight(state);
-    let connected_label = if connected.connected_panels.is_empty() {
-        "None".to_string()
-    } else {
-        connected
-            .connected_panels
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
     let sel_pts = effective_selected_points(state);
     let has_sel_pts = !sel_pts.is_empty();
     let has_round_target = has_sel_pts || state.selected_2d_edge.is_some();
@@ -5405,21 +5474,26 @@ fn build_runner_property_accordions(state: &CssRunnerState) -> Node {
     } else {
         "cad-corner-menu-box"
     };
-    let preview_count = if open_1 {
-        active_fillet_previews(state).len()
-    } else {
-        0
-    };
-    let corner_menu_badge = if preview_count > 0 {
-        format!("Live preview ({preview_count})")
-    } else if state.active_2d_tool == "Corner" {
-        "Menu Active".to_string()
-    } else if has_sel_pts {
-        "Adjust to preview".to_string()
-    } else {
-        "Select corner".to_string()
-    };
-    let sel_info: (String, String, String, String) = if sel_pts.len() > 1 {
+    // Rows describe the current 2D selection only; with nothing selected the
+    // section shows just the corner controls.
+    let mut boundary_rows: Vec<(&'static str, String)> = Vec::new();
+    let edge_rows =
+        |rows: &mut Vec<(&'static str, String)>, p: &Panel, edge: &str, curved: bool| {
+            rows.push((
+                "Curvature Type",
+                if curved { "Cubic Bézier" } else { "Straight" }.into(),
+            ));
+            if let Some(m) = panel_edge_length_m(p, edge) {
+                rows.push(("Boundary Length", format!("{:.1} mm", m * 1000.0)));
+            }
+            if let Some(poly) = &p.polygon {
+                rows.push((
+                    "Seam Allowance",
+                    format!("{:.1} mm", poly.allowance_of(edge) * 1000.0),
+                ));
+            }
+        };
+    if sel_pts.len() > 1 {
         let mut any_curved = false;
         let mut any_straight = false;
         for (pid, pt_idx) in &sel_pts {
@@ -5437,17 +5511,16 @@ fn build_runner_property_accordions(state: &CssRunnerState) -> Node {
                 }
             }
         }
-        let ctype = match (any_curved, any_straight) {
-            (true, true) => "Mixed",
-            (true, false) => "Cubic Bézier",
-            _ => "Straight",
-        };
-        (
-            format!("{} corners selected", sel_pts.len()),
-            ctype.into(),
-            "Multiple".into(),
-            "—".into(),
-        )
+        boundary_rows.push(("2D Selection", format!("{} corners", sel_pts.len())));
+        boundary_rows.push((
+            "Curvature Type",
+            match (any_curved, any_straight) {
+                (true, true) => "Mixed",
+                (true, false) => "Cubic Bézier",
+                _ => "Straight",
+            }
+            .into(),
+        ));
     } else if let Some((pid, pt_idx)) = sel_pts.into_iter().next() {
         if let Some(p) = template.panels.iter().find(|p| p.id == pid)
             && let Some(ref poly) = p.polygon
@@ -5455,61 +5528,33 @@ fn build_runner_property_accordions(state: &CssRunnerState) -> Node {
         {
             let prev_name = &poly.edges[(pt_idx + poly.edges.len() - 1) % poly.edges.len()];
             let curved = poly.curves.contains_key(edge_name) || poly.curves.contains_key(prev_name);
-            let ctype = if curved { "Cubic Bézier" } else { "Straight" }.to_string();
-            let len_str = panel_edge_length_m(p, edge_name)
-                .map_or("—".into(), |m| format!("{:.1} mm", m * 1000.0));
-            let sa_str = format!("{:.1} mm", poly.allowance_of(edge_name) * 1000.0);
-            (
-                format!("Corner #{pt_idx} ({edge_name})"),
-                ctype,
-                len_str,
-                sa_str,
-            )
+            boundary_rows.push(("2D Selection", format!("Corner #{pt_idx} ({edge_name})")));
+            edge_rows(&mut boundary_rows, p, edge_name, curved);
         } else {
-            (
-                format!("Corner #{pt_idx}"),
-                "—".into(),
-                "—".into(),
-                "0.0 mm".into(),
-            )
+            boundary_rows.push(("2D Selection", format!("Corner #{pt_idx}")));
         }
     } else if let Some((ref pid, ref ename)) = state.selected_2d_edge {
+        boundary_rows.push(("2D Selection", format!("Edge {ename}")));
         if let Some(p) = template.panels.iter().find(|p| &p.id == pid)
             && let Some(ref poly) = p.polygon
         {
-            let ctype = if poly.curves.contains_key(ename) {
-                "Cubic Bézier"
-            } else {
-                "Straight"
-            }
-            .to_string();
-            let len_str = panel_edge_length_m(p, ename)
-                .map_or("—".into(), |m| format!("{:.1} mm", m * 1000.0));
-            let sa_str = format!("{:.1} mm", poly.allowance_of(ename) * 1000.0);
-            (format!("Edge {ename}"), ctype, len_str, sa_str)
-        } else {
-            (
-                format!("Edge {ename}"),
-                "—".into(),
-                "—".into(),
-                "0.0 mm".into(),
-            )
+            edge_rows(
+                &mut boundary_rows,
+                p,
+                ename,
+                poly.curves.contains_key(ename),
+            );
         }
-    } else {
-        let curve_count = selected_panel
-            .and_then(|p| p.polygon.as_ref())
-            .map_or(0, |poly| poly.curves.len());
-        (
-            "Click point or edge".into(),
-            if curve_count > 0 {
-                format!("{curve_count} Bézier curves")
-            } else {
-                "Straight contour".into()
-            },
-            "—".into(),
-            "0.0 mm".into(),
-        )
-    };
+    }
+    if !connected.connected_panels.is_empty() {
+        let linked = connected
+            .connected_panels
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        boundary_rows.insert(boundary_rows.len().min(1), ("Linked Pieces", linked));
+    }
     let mode_radius_prop_btn = if state.corner_mode_radius {
         "cad-prop-btn active"
     } else {
@@ -5539,36 +5584,16 @@ fn build_runner_property_accordions(state: &CssRunnerState) -> Node {
     let acc_line = ui! {
         <div class={if open_1 { "accordion open" } else { "accordion collapsed" }}>
             <button class="accordion-header" onclick_shared={queue_action(&state.actions, ACT_RUN_ACC_1)}>
-                <span>"2. Boundary & Allowance"</span>
+                <span>"Boundary & Allowance"</span>
                 {if open_1 { icon_chevron_down() } else { icon_chevron_right() }}
             </button>
             {if open_1 {
                 ui! {
                     <div class="accordion-content">
-                        <div class="prop-row">
-                            <span class="prop-label">"2D Selection"</span>
-                            <span class="prop-value">{sel_info.0}</span>
-                        </div>
-                        <div class="prop-row">
-                            <span class="prop-label">"Linked Pieces"</span>
-                            <span class="prop-value">{connected_label}</span>
-                        </div>
-                        <div class="prop-row">
-                            <span class="prop-label">"Curvature Type"</span>
-                            <span class="prop-value">{sel_info.1}</span>
-                        </div>
-                        <div class="prop-row">
-                            <span class="prop-label">"Boundary Length"</span>
-                            <span class="prop-value">{sel_info.2}</span>
-                        </div>
-                        <div class="prop-row">
-                            <span class="prop-label">"Seam Allowance"</span>
-                            <span class="prop-value">{sel_info.3}</span>
-                        </div>
+                        {prop_rows(boundary_rows)}
                         <div id="corner-rounding-menu" class={corner_menu_box_class}>
                             <div class="cad-corner-menu-header">
-                                <span>"Corner Rounding Menu"</span>
-                                <span id="corner-menu-badge" class="cad-corner-menu-badge">{corner_menu_badge}</span>
+                                <span>"Corner Rounding"</span>
                             </div>
                             <div class="cad-prop-actions">
                                 <button id="prop-corner-radius-mode" class={mode_radius_prop_btn} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::SetCornerMode(true))}>"Radius"</button>
@@ -5607,31 +5632,13 @@ fn build_runner_property_accordions(state: &CssRunnerState) -> Node {
     let acc_arrange = ui! {
         <div class={if open_2 { "accordion open" } else { "accordion collapsed" }}>
             <button class="accordion-header" onclick_shared={queue_action(&state.actions, ACT_RUN_ACC_2)}>
-                <span>"3. 3D Arrangement"</span>
+                <span>"3D Arrangement"</span>
                 {if open_2 { icon_chevron_down() } else { icon_chevron_right() }}
             </button>
             {if open_2 {
                 ui! {
                     <div class="accordion-content">
-                        <div class="prop-row">
-                            <span class="prop-label">"Translation X"</span>
-                            <span class="prop-value">{format!("{:.1} cm", selected_panel.map_or(0.0, |p| p.placement.translation.x * 100.0))}</span>
-                        </div>
-                        <div class="prop-row">
-                            <span class="prop-label">"Translation Y"</span>
-                            <span class="prop-value">{format!("{:.1} cm", selected_panel.map_or(0.0, |p| p.placement.translation.y * 100.0))}</span>
-                        </div>
-                        <div class="prop-row">
-                            <span class="prop-label">"Translation Z"</span>
-                            <span class="prop-value">{format!("{:.1} cm", selected_panel.map_or(0.0, |p| p.placement.translation.z * 100.0))}</span>
-                        </div>
-                        <div class="prop-row">
-                            <span class="prop-label">"Rotation (X/Y/Z)"</span>
-                            <span class="prop-value">{format!("{:.0}°/{:.0}°/{:.0}°",
-                                selected_panel.map_or(0.0, |p| p.placement.rotation_degrees.x),
-                                selected_panel.map_or(0.0, |p| p.placement.rotation_degrees.y),
-                                selected_panel.map_or(0.0, |p| p.placement.rotation_degrees.z))}</span>
-                        </div>
+                        {prop_rows(arrange_rows)}
                     </div>
                 }
             } else {
@@ -5644,7 +5651,7 @@ fn build_runner_property_accordions(state: &CssRunnerState) -> Node {
     let acc_pins = ui! {
         <div class={if open_3 { "accordion open" } else { "accordion collapsed" }}>
             <button class="accordion-header" onclick_shared={queue_action(&state.actions, ACT_RUN_ACC_3)}>
-                <span>"4. Pins & Restraints"</span>
+                <span>"Pins & Restraints"</span>
                 {if open_3 { icon_chevron_down() } else { icon_chevron_right() }}
             </button>
             {if open_3 {
@@ -5658,10 +5665,6 @@ fn build_runner_property_accordions(state: &CssRunnerState) -> Node {
                             <span class="prop-label">"Active Pin Mode"</span>
                             <span class="prop-value">{if state.pin_mode_contour { "Contour" } else { "Interior" }}</span>
                         </div>
-                        <div class="prop-row">
-                            <span class="prop-label">"Pin Stiffness"</span>
-                            <span class="prop-value">"1e5 N/m"</span>
-                        </div>
                     </div>
                 }
             } else {
@@ -5674,7 +5677,7 @@ fn build_runner_property_accordions(state: &CssRunnerState) -> Node {
     let acc_fabric = ui! {
         <div class={if open_4 { "accordion open" } else { "accordion collapsed" }}>
             <button class="accordion-header" onclick_shared={queue_action(&state.actions, ACT_RUN_ACC_4)}>
-                <span>"5. Fabric Mechanics"</span>
+                <span>"Fabric Mechanics"</span>
                 {if open_4 { icon_chevron_down() } else { icon_chevron_right() }}
             </button>
             {if open_4 {
@@ -5701,29 +5704,14 @@ fn build_runner_property_accordions(state: &CssRunnerState) -> Node {
     let acc_sim = ui! {
         <div class={if open_5 { "accordion open" } else { "accordion collapsed" }}>
             <button class="accordion-header" onclick_shared={queue_action(&state.actions, ACT_RUN_ACC_5)}>
-                <span>"6. Simulation Diagnostics"</span>
+                <span>"Simulation Diagnostics"</span>
                 {if open_5 { icon_chevron_down() } else { icon_chevron_right() }}
             </button>
 
             {if open_5 {
                 ui! {
                     <div class="accordion-content">
-                        <div class="prop-row">
-                            <span class="prop-label">"Solver Step Time"</span>
-                            <span class="prop-value">{format!("{:.2} ms", state.step_ms)}</span>
-                        </div>
-                        <div class="prop-row">
-                            <span class="prop-label">"Force Residual"</span>
-                            <span class="prop-value">{last_res}</span>
-                        </div>
-                        <div class="prop-row">
-                            <span class="prop-label">"Minimum Detected Gap"</span>
-                            <span class="prop-value">{last_pen}</span>
-                        </div>
-                        <div class="prop-row">
-                            <span class="prop-label">"Active Backend"</span>
-                            <span class="prop-value">{if state.gpu_sim { state.contact_method.label() } else { "CPU (OGC)" }}</span>
-                        </div>
+                        {prop_rows(diagnostics_rows)}
                     </div>
                 }
             } else {

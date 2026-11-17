@@ -36,7 +36,8 @@ Audit: 17 November 2026, against `main` at `fcd319a`. FC-0022 ([NicTanghe/FoldCr
 
 - Panel placement (translation/rotation) in the Arrange accordion.
 - Pin count and mode in the Pins accordion.
-- The **Fabric Mechanics** accordion shows fixed values (180 g/m², 150/120 N/m, 0.002 N·m) for every panel. Only the preset name comes from the document. The values are not the panel's compiled properties.
+- The **Fabric Mechanics** accordion shows the selected panel's fabric from the document.
+- **Piece Information** measures the sampled rest outline, so curved edges count: bounding-box width and height, cut area (outer contour minus holes) and outer contour length. Simulation Diagnostics rows appear only once a step has produced that value. Pins are exact position constraints, so no pin stiffness is shown.
 - 3D rail modes Gizmo, Grab, 3D Sew, Pin, Measure and Avatar Diagnostics. Each one only highlights its rail button.
 
 ## Messages and errors
