@@ -69,7 +69,8 @@ The format priorities below remain product priorities: a **critical** animation 
 
 - [x] Unified metric 2D board, rectangle/pen creation with straight and cubic Bézier boundaries; constrained Delaunay meshing.
 - [x] Whole-edge 2D sewing (`Command::Sew`, `range: [0, 1]`) with seam removal and undo; easing is enabled only for unequal lengths and shown per seam.
-- [~] Linked 2D/3D panel/edge selection, panel duplicate/delete, 3D edge sewing, direction handles and an explicit easing choice (FC-0061 in review).
+- [x] Delete the explicitly selected piece and its seams with Delete/Backspace, as one undo step (FC-0066).
+- [~] Linked 2D/3D panel/edge selection, panel duplicate, multi-piece delete, 3D edge sewing, direction handles and an explicit easing choice (FC-0061 in review).
 - [~] Sparse colored seam links and endpoint ticks in 2D/3D, linked hover/selection and distinguishable pending previews (egui overlays removed).
 - [~] World-axis translation/rotation gizmos, numeric transforms and transactional preview; the native Arrange accordion displays placement only.
 - [~] Direct 3D move/rotate tools (G/R), edge-on rotation rings, 15° snapping and 2D board rotation independent of physical rest/grain.
