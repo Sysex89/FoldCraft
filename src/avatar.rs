@@ -13,7 +13,10 @@ pub struct SurfaceMesh {
 }
 impl SurfaceMesh {
     pub fn load_obj(path: &Path) -> Result<Self, String> {
-        Self::parse_obj(&fs::read_to_string(path).map_err(|e| e.to_string())?)
+        Self::parse_obj(
+            &fs::read_to_string(path)
+                .map_err(|e| format!("Cannot read avatar {}: {e}", path.display()))?,
+        )
     }
     pub fn parse_obj(text: &str) -> Result<Self, String> {
         let mut mesh = Self {
