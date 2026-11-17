@@ -885,6 +885,19 @@
       "owner": null,
       "vruntime": 3.3420396096354286,
       "pr": "https://github.com/NicTanghe/FoldCraft/pull/59"
+    },
+    {
+      "id": "FC-0066",
+      "title": "Delete the selected panel with the Delete key in the native 2D board",
+      "acceptance": "In cloth-fit --view, Delete/Backspace with a selected panel and no selected points issues Command::RemovePanel as one undo step: the panel and every seam referencing it are removed, selection is cleared, undo restores both. Selected points keep priority (existing point deletion unchanged). Deleting the last panel or a panel blocked by authoring checks leaves the document unchanged and shows the board inline error. CPU test drives the real key event.",
+      "points": 1.0,
+      "spent": 0,
+      "priority": "high",
+      "depends_on": [],
+      "status": "active",
+      "owner": "claude-panel-delete",
+      "vruntime": 3.3420396096354286,
+      "pr": null
     }
   ]
 }
