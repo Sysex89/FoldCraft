@@ -62,10 +62,6 @@ pub const ACT_SOLVER_CPU: u64 = 1 << 26;
 pub const ACT_SOLVER_AL: u64 = 1 << 27;
 pub const ACT_TOOL_GIZMO: u64 = 1 << 28;
 pub const ACT_TOOL_EDIT2D: u64 = 1 << 29;
-pub const ACT_TOOL_RECT2D: u64 = 1 << 30;
-pub const ACT_TOOL_PEN2D: u64 = 1 << 31;
-pub const ACT_TOOL_CORNER2D: u64 = 1 << 32;
-pub const ACT_TOOL_MEASURE2D: u64 = 1 << 33;
 
 // Onclick trampolines
 
@@ -266,7 +262,11 @@ pub struct CssEditorState {
     pub active_3d_tool: String,
     pub active_2d_tool: String,
     pub selected_edge: Option<usize>,
-    pub status_message: String,
+    /// One-line errors shown beside what failed; cleared on the next success.
+    pub errors: EditorErrors,
+    /// Barrier-AL gap residual (m) and largest original force (N) of the
+    /// last accepted GPU step, when that backend reports them.
+    pub al_diagnostics: Option<(f64, f64)>,
     // Mesh prep inputs
     pub mesh_prep_warp_e: String,
     pub mesh_prep_weft_e: String,
@@ -281,6 +281,17 @@ pub struct CssEditorState {
     pub worker_tx: mpsc::Sender<RefWork>,
     pub worker_latest: RefLatest,
     pub generation: u64,
+}
+
+/// Errors the user has to act on, each drawn beside the control that failed.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EditorErrors {
+    /// Beside Save.
+    pub save: Option<String>,
+    /// Beside Export OBJ.
+    pub export: Option<String>,
+    /// Beside the transport: the worker stopped, or Reset could not rebuild.
+    pub solver: Option<String>,
 }
 
 impl CssEditorState {
@@ -345,7 +356,8 @@ impl CssEditorState {
             active_3d_tool: "Gizmo".to_string(),
             active_2d_tool: "Edit".to_string(),
             selected_edge: None,
-            status_message: "Ready".to_string(),
+            errors: EditorErrors::default(),
+            al_diagnostics: None,
             mesh_prep_warp_e: warp,
             mesh_prep_weft_e: weft,
             mesh_prep_ratio: ratio,
@@ -391,8 +403,8 @@ impl CssEditorState {
         self.playing = false;
         self.metrics = None;
         self.step_ms = 0.0;
-        self.status_message =
-            "Solver changed; paused at displayed state. Press Play or Step.".into();
+        self.al_diagnostics = None;
+        self.errors.solver = None;
         self.send_control_state(false);
     }
 
@@ -418,32 +430,20 @@ impl CssEditorState {
     fn accept_step(&mut self, new_state: State, metrics: EditorMetrics) {
         self.state = new_state;
         self.step_count += 1;
+        self.errors.solver = None;
         match metrics {
             EditorMetrics::Reference(m) => {
                 self.step_ms = m.step_ms;
-                self.status_message = format!(
-                    "Step {}: max pen {:.3} mm, residual {:.1e}, {:.1} ms",
-                    self.step_count,
-                    m.max_vertex_penetration_m * 1000.,
-                    m.residual_rms_n,
-                    m.step_ms
-                );
                 self.metrics = Some(*m);
+                self.al_diagnostics = None;
             }
             EditorMetrics::Avbd(m) => {
                 self.step_ms = m.step_ms;
                 self.metrics = None;
-                self.status_message = if let Some(al) = &m.barrier_al {
-                    format!(
-                        "Barrier AL step {}: {:.1} ms; gap residual {:.2e} m, force max {:.2e} N; fixed budget",
-                        self.step_count, m.step_ms, al.primal_m, al.original_force_max_n
-                    )
-                } else {
-                    format!(
-                        "WGSL AVBD / IPC step {}: {:.1} ms; fixed budget, residual unavailable",
-                        self.step_count, m.step_ms
-                    )
-                };
+                self.al_diagnostics = m
+                    .barrier_al
+                    .as_ref()
+                    .map(|al| (al.primal_m, al.original_force_max_n));
             }
         }
         self.sync_usd_points();
@@ -454,7 +454,7 @@ impl CssEditorState {
             && let Err(error) =
                 marvelous_cloth::usd_scene::update_viewport_camera(scene, &self.camera)
         {
-            self.status_message = format!("USD camera update error: {error}");
+            eprintln!("USD camera update error: {error}");
         }
     }
 
@@ -466,28 +466,39 @@ impl CssEditorState {
                 &self.state.x,
             )
         {
-            self.status_message = format!("USD update error: {error}");
+            eprintln!("USD update error: {error}");
         }
     }
 
-    pub fn reset(&mut self) {
+    /// Rebuild the mesh from the active project and restart. A project that
+    /// does not build leaves the current simulation untouched and returns why.
+    pub fn reset(&mut self) -> Result<(), String> {
+        let (mesh, state) = self.active.build()?;
         self.generation = self.generation.wrapping_add(1);
         self.playing = false;
-        if let Ok((mesh, state)) = self.active.build() {
-            self.mesh = Arc::new(mesh);
-            self.state = state;
-            self.metrics = None;
-            self.step_count = 0;
-            self.step_ms = 0.0;
-            self.status_message = "Reset simulation state".to_string();
-            if let Some(scene) = &self.usd_scene
-                && let Err(error) =
-                    marvelous_cloth::usd_scene::update_viewport_topology(scene, &self.mesh)
-            {
-                self.status_message = format!("USD topology error: {error}");
-            }
-            self.sync_usd_points();
-            self.send_control_state(false);
+        self.mesh = Arc::new(mesh);
+        self.state = state;
+        self.metrics = None;
+        self.al_diagnostics = None;
+        self.step_count = 0;
+        self.step_ms = 0.0;
+        self.errors.solver = None;
+        if let Some(scene) = &self.usd_scene
+            && let Err(error) =
+                marvelous_cloth::usd_scene::update_viewport_topology(scene, &self.mesh)
+        {
+            eprintln!("USD topology error: {error}");
+        }
+        self.sync_usd_points();
+        self.send_control_state(false);
+        Ok(())
+    }
+
+    /// Transport and scene buttons: a failed rebuild is shown beside the
+    /// transport controls.
+    fn reset_from_transport(&mut self) {
+        if let Err(e) = self.reset() {
+            self.errors.solver = Some(e);
         }
     }
 
@@ -495,8 +506,8 @@ impl CssEditorState {
         let _ = fs::create_dir_all(&self.output_dir);
         let path = self.output_dir.join("project.json");
         match self.active.save(&path) {
-            Ok(_) => self.status_message = format!("Saved {}", path.display()),
-            Err(e) => self.status_message = format!("Save error: {e}"),
+            Ok(_) => self.errors.save = None,
+            Err(e) => self.errors.save = Some(e.to_string()),
         }
     }
 
@@ -505,8 +516,8 @@ impl CssEditorState {
         let path = self.output_dir.join("cloth.obj");
         let obj_text = project::obj(&self.mesh, &self.state);
         match fs::write(&path, obj_text) {
-            Ok(_) => self.status_message = format!("Exported {}", path.display()),
-            Err(e) => self.status_message = format!("Export error: {e}"),
+            Ok(_) => self.errors.export = None,
+            Err(e) => self.errors.export = Some(e.to_string()),
         }
     }
 
@@ -514,7 +525,7 @@ impl CssEditorState {
         let parse_num = |s: &str| {
             s.trim()
                 .parse::<f64>()
-                .map_err(|_| "Enter numeric sizing values".to_string())
+                .map_err(|_| "Sizing values must be numbers".to_string())
         };
 
         let result = (|| -> Result<PhysicsSizing, String> {
@@ -539,10 +550,15 @@ impl CssEditorState {
 
         match result {
             Ok(plan) => {
-                self.active.physics_sizing = Some(plan);
-                self.mesh_prep_error = None;
-                self.reset();
-                self.status_message = "Remeshed with physics sizing".to_string();
+                let previous = self.active.physics_sizing.replace(plan);
+                match self.reset() {
+                    Ok(()) => self.mesh_prep_error = None,
+                    Err(e) => {
+                        // Keep the project consistent with the mesh on screen.
+                        self.active.physics_sizing = previous;
+                        self.mesh_prep_error = Some(e);
+                    }
+                }
             }
             Err(e) => {
                 self.mesh_prep_error = Some(e);
@@ -551,10 +567,14 @@ impl CssEditorState {
     }
 
     pub fn uniform_grid_and_reset(&mut self) {
-        self.active.physics_sizing = None;
-        self.mesh_prep_error = None;
-        self.reset();
-        self.status_message = "Reset to uniform grid".to_string();
+        let previous = self.active.physics_sizing.take();
+        match self.reset() {
+            Ok(()) => self.mesh_prep_error = None,
+            Err(e) => {
+                self.active.physics_sizing = previous;
+                self.mesh_prep_error = Some(e);
+            }
+        }
     }
 }
 
@@ -579,7 +599,7 @@ pub fn update_editor(state: &mut CssEditorState, _frame: FrameInfo) -> Invalidat
             }
             Err(e) => {
                 state.playing = false;
-                state.status_message = format!("Solver error: {e}");
+                state.errors.solver = Some(e.to_string());
                 state.send_control_state(false);
             }
         }
@@ -607,7 +627,7 @@ pub fn update_editor(state: &mut CssEditorState, _frame: FrameInfo) -> Invalidat
         state.trigger_step();
     }
     if actions & ACT_RESET != 0 {
-        state.reset();
+        state.reset_from_transport();
     }
     if actions & ACT_SAVE != 0 {
         state.save_project();
@@ -624,7 +644,7 @@ pub fn update_editor(state: &mut CssEditorState, _frame: FrameInfo) -> Invalidat
     if actions & ACT_SCENE_SPHERE != 0 {
         state.active.scene = Scene::Sphere;
         state.active.sphere = Some(Default::default());
-        state.reset();
+        state.reset_from_transport();
         let sphere_surface = state
             .active
             .sphere
@@ -639,21 +659,18 @@ pub fn update_editor(state: &mut CssEditorState, _frame: FrameInfo) -> Invalidat
     if actions & ACT_SCENE_HANG != 0 {
         state.active.scene = Scene::Hanging;
         state.active.sphere = None;
-        state.reset();
+        state.reset_from_transport();
         state.camera = marvelous_cloth::usd_scene::default_scene_camera(&state.state.x, None);
         state.sync_usd_camera();
     }
     if actions & ACT_TOGGLE_WIRE != 0 {
         state.wire = !state.wire;
-        state.status_message = format!("Wireframe: {}", if state.wire { "ON" } else { "OFF" });
     }
     if actions & ACT_TOGGLE_SHADED != 0 {
         state.shaded = !state.shaded;
-        state.status_message = format!("Shaded: {}", if state.shaded { "ON" } else { "OFF" });
     }
     if actions & ACT_TOGGLE_COLLIDER != 0 {
         state.collider = !state.collider;
-        state.status_message = format!("Collider: {}", if state.collider { "ON" } else { "OFF" });
     }
     if actions & ACT_TAB_PROPERTIES != 0 {
         state.active_tab = EditorTab::Properties;
@@ -696,52 +713,17 @@ pub fn update_editor(state: &mut CssEditorState, _frame: FrameInfo) -> Invalidat
             sphere_surface.as_ref(),
         );
         state.sync_usd_camera();
-        state.status_message = "Reset 3D camera".to_string();
     }
     if actions & ACT_EDGE_SELECT_NEXT != 0 {
         let next = state.selected_edge.map_or(0, |e| (e + 1) % 4);
         state.selected_edge = Some(next);
-        state.status_message = format!("Selected boundary edge {}", next + 1);
     }
     if actions & ACT_TOOL_GIZMO != 0 {
         state.active_3d_tool = "Gizmo".to_string();
-        state.status_message = "3D Orbit tool active (drag in 3D viewport to orbit)".to_string();
     }
     if actions & ACT_TOOL_EDIT2D != 0 {
         state.active_2d_tool = "Edit".to_string();
-        let next = state.selected_edge.unwrap_or(0);
-        state.selected_edge = Some(next);
-        state.status_message = format!(
-            "2D Inspect (Project v1 rect edge {}; launch `cloth-fit --view` for freeform 2D editing)",
-            next + 1
-        );
-    }
-    if actions & ACT_TOOL_RECT2D != 0 {
-        state.active_2d_tool = "Rect".to_string();
-        state.status_message =
-            "Project v1 shows fixed rectangular pattern (use `cloth-fit --view` to draw pieces)"
-                .to_string();
-    }
-    if actions & ACT_TOOL_PEN2D != 0 {
-        state.active_2d_tool = "Pen".to_string();
-        state.status_message =
-            "Project v1 shows fixed rectangular pattern (use `cloth-fit --view` to draw polygons)"
-                .to_string();
-    }
-    if actions & ACT_TOOL_CORNER2D != 0 {
-        state.active_2d_tool = "Corner".to_string();
-        state.status_message =
-            "Corner rounding edits v2 polygons (launch `cloth-fit --view` to round & adjust Bézier handles)"
-                .to_string();
-    }
-    if actions & ACT_TOOL_MEASURE2D != 0 {
-        state.active_2d_tool = "Measure".to_string();
-        let p = &state.active.pattern;
-        state.status_message = format!(
-            "Pattern dimensions: {:.0} × {:.0} mm",
-            p.width * 1000.0,
-            p.height * 1000.0
-        );
+        state.selected_edge = Some(state.selected_edge.unwrap_or(0));
     }
 
     if actions != 0 || (had_result && !state.playing) {
@@ -756,8 +738,9 @@ pub fn update_editor(state: &mut CssEditorState, _frame: FrameInfo) -> Invalidat
 fn editor_viewport_3d_contains(state: &CssEditorState, px: f32, py: f32) -> bool {
     let win_w = state.window_size.0.max(100.0);
     let win_h = state.window_size.1.max(100.0);
-    let body_y = 40.0_f32 + 32.0;
-    let body_h = (win_h - 40.0 - 26.0 - 32.0).max(1.0);
+    // Top bar 40 px, status bar 26 px; the 3D viewport has no header.
+    let body_y = 40.0_f32;
+    let body_h = (win_h - 40.0 - 26.0).max(1.0);
     let left_w = 48.0_f32 + if state.left_drawer_open { 240.0 } else { 0.0 };
     let right_w = 48.0_f32 + 300.0;
     let stage_w = (win_w - left_w - right_w).max(1.0);
@@ -886,7 +869,26 @@ pub fn build_editor_ui(state: &CssEditorState) -> Node {
     }
 }
 
+/// Solver names, identical in the picker and on its badge. The experimental
+/// barrier-AL backend is marked by the `experimental` class, not by words.
+const SOLVER_GPU_IPC: &str = "WGSL AVBD / IPC";
+const SOLVER_GPU_AL: &str = "WGSL AVBD / barrier AL";
+const SOLVER_CPU: &str = "CPU Reference Newton";
+
+/// One-line error beside the control whose action failed, or nothing.
+fn inline_error(id: &'static str, message: Option<&str>) -> Node {
+    match message {
+        Some(message) => ui! { <span id={id} class="inline-error">{message.to_string()}</span> },
+        None => ui! { <span class="hidden" /> },
+    }
+}
+
 fn build_top_bar(state: &CssEditorState) -> Node {
+    let (backend_class, backend_label) = match (state.gpu_sim, state.contact_method) {
+        (true, ContactMethod::Ipc) => ("backend-badge gpu", SOLVER_GPU_IPC),
+        (true, ContactMethod::BarrierAl) => ("backend-badge gpu experimental", SOLVER_GPU_AL),
+        (false, _) => ("backend-badge cpu", SOLVER_CPU),
+    };
     let play_label = if state.playing { "Pause" } else { "Play" };
     let play_class = if state.playing {
         "transport-btn playing"
@@ -903,58 +905,60 @@ fn build_top_bar(state: &CssEditorState) -> Node {
     ui! {
         <header class="top-bar">
             <div class="top-bar-left">
-                <span class="app-title">"FoldCraft | Reference Editor"</span>
                 <nav class="menu-bar">
-                    <button class="menu-item" onclick_shared={queue_action(&state.actions, ACT_SAVE)}>"Save (Ctrl+S)"</button>
+                    <button class="menu-item" onclick_shared={queue_action(&state.actions, ACT_SAVE)}>"Save"</button>
+                    {inline_error("save-error", state.errors.save.as_deref())}
                     <button class="menu-item" onclick_shared={queue_action(&state.actions, ACT_EXPORT_OBJ)}>"Export OBJ"</button>
+                    {inline_error("export-error", state.errors.export.as_deref())}
                 </nav>
             </div>
             <div class="sim-transport">
-                <button id="sim-play-btn" class={play_class} onclick_shared={queue_action(&state.actions, ACT_PLAY_PAUSE)} title="Toggle Simulation (Space)">
+                <button id="sim-play-btn" class={play_class} onclick_shared={queue_action(&state.actions, ACT_PLAY_PAUSE)}>
                     {if state.playing { icon_pause() } else { icon_play() }}
                     <span class="btn-label">{play_label}</span>
                 </button>
-                <button id="sim-step-btn" class="transport-btn" onclick_shared={queue_action(&state.actions, ACT_STEP)} title="Step Simulation">
+                <button id="sim-step-btn" class="transport-btn" onclick_shared={queue_action(&state.actions, ACT_STEP)}>
                     {icon_step()}
                     <span class="btn-label">"Step"</span>
                 </button>
-                <button id="sim-reset-btn" class="transport-btn" onclick_shared={queue_action(&state.actions, ACT_RESET)} title="Reset Simulation">
+                <button id="sim-reset-btn" class="transport-btn" onclick_shared={queue_action(&state.actions, ACT_RESET)}>
                     {icon_reset()}
                     <span class="btn-label">"Reset"</span>
                 </button>
                 <div class="solver-picker">
-                    <button id="sim-backend-indicator" class="backend-badge" onclick_shared={queue_action(&state.actions, ACT_SOLVER_MENU)}>
-                        {if state.gpu_sim {format!("{} ▾", state.contact_method.label())} else {"CPU Reference ▾".into()}}
+                    <button id="sim-backend-indicator" class={backend_class} onclick_shared={queue_action(&state.actions, ACT_SOLVER_MENU)}>
+                        {format!("{backend_label} ▾")}
                     </button>
                     {if state.solver_menu_open { ui! {
                         <div id="solver-dropdown" class="solver-dropdown">
-                            <button id="solver-wgsl-ipc" class="menu-item" onclick_shared={queue_action(&state.actions, ACT_SOLVER_GPU)}>"WGSL AVBD / IPC"</button>
-                            <button id="solver-barrier-al" class="menu-item" onclick_shared={queue_action(&state.actions, ACT_SOLVER_AL)}>"WGSL AVBD / barrier AL (experimental)"</button>
-                            <button id="solver-cpu" class="menu-item" onclick_shared={queue_action(&state.actions, ACT_SOLVER_CPU)}>"CPU Reference Newton"</button>
+                            <button id="solver-wgsl-ipc" class="menu-item" onclick_shared={queue_action(&state.actions, ACT_SOLVER_GPU)}>{SOLVER_GPU_IPC}</button>
+                            <button id="solver-barrier-al" class="menu-item experimental" onclick_shared={queue_action(&state.actions, ACT_SOLVER_AL)}>{SOLVER_GPU_AL}</button>
+                            <button id="solver-cpu" class="menu-item" onclick_shared={queue_action(&state.actions, ACT_SOLVER_CPU)}>{SOLVER_CPU}</button>
                         </div>
                     }} else { ui! { <span /> } }}
                 </div>
+                {inline_error("solver-error", state.errors.solver.as_deref())}
             </div>
             <div class="top-bar-right">
                 <div class="layout-switcher">
-                    <button class={split_class} onclick_shared={queue_action(&state.actions, ACT_VIEW_SPLIT)} title="Split View">
+                    <button class={split_class} onclick_shared={queue_action(&state.actions, ACT_VIEW_SPLIT)}>
                         {icon_view_split()}
                         <span class="btn-label">"Split"</span>
                     </button>
-                    <button class={threed_class} onclick_shared={queue_action(&state.actions, ACT_VIEW_3D)} title="3D View">
+                    <button class={threed_class} onclick_shared={queue_action(&state.actions, ACT_VIEW_3D)}>
                         {icon_view_3d()}
                         <span class="btn-label">"3D"</span>
                     </button>
-                    <button class={twod_class} onclick_shared={queue_action(&state.actions, ACT_VIEW_2D)} title="2D View">
+                    <button class={twod_class} onclick_shared={queue_action(&state.actions, ACT_VIEW_2D)}>
                         {icon_view_2d()}
                         <span class="btn-label">"2D"</span>
                     </button>
                 </div>
-                <button id="command-palette-trigger" class="btn-secondary" onclick_shared={queue_action(&state.actions, ACT_PALETTE_TOGGLE)} title="Command Palette (Ctrl+K)">
+                <button id="command-palette-trigger" class="btn-secondary" onclick_shared={queue_action(&state.actions, ACT_PALETTE_TOGGLE)}>
                     {icon_palette()}
                     <span class="btn-label">"Palette"</span>
                 </button>
-                <button id="theme-toggle" class="btn-secondary" onclick_shared={queue_action(&state.actions, ACT_THEME_TOGGLE)} title="Toggle Dark/Light Theme">
+                <button id="theme-toggle" class="btn-secondary" onclick_shared={queue_action(&state.actions, ACT_THEME_TOGGLE)} title="Theme" aria-label="Theme">
                     {icon_day_night_switch(state.theme == Theme::Dark)}
                 </button>
             </div>
@@ -970,19 +974,19 @@ fn build_tool_rail_3d(state: &CssEditorState) -> Node {
     };
     ui! {
         <aside id="rail-3d" class="tool-rail tool-rail-3d">
-            <button class={gizmo_class} onclick_shared={queue_action(&state.actions, ACT_TOOL_GIZMO)} title="Select & Arrange [Gizmo] (1)">
+            <button class={gizmo_class} onclick_shared={queue_action(&state.actions, ACT_TOOL_GIZMO)}>
                 {icon_gizmo()}
                 <span class="tool-label">"Gizmo"</span>
             </button>
-            <button class="tool-btn" onclick_shared={queue_action(&state.actions, ACT_CAM_RESET)} title="Reset Camera View [Framing] (0)">
+            <button class="tool-btn" onclick_shared={queue_action(&state.actions, ACT_CAM_RESET)}>
                 {icon_cam_reset()}
-                <span class="tool-label">"Reset"</span>
+                <span class="tool-label">"Reset Camera"</span>
             </button>
-            <button class="tool-btn" onclick_shared={queue_action(&state.actions, ACT_EDGE_SELECT_NEXT)} title="Cycle Selected Edge (Tab)">
+            <button class="tool-btn" onclick_shared={queue_action(&state.actions, ACT_EDGE_SELECT_NEXT)}>
                 {icon_select_2d()}
                 <span class="tool-label">"Edge"</span>
             </button>
-            <button class="tool-btn" onclick_shared={queue_action(&state.actions, ACT_DRAWER_TOGGLE)} title="Toggle Left Drawer (☰)">
+            <button class="tool-btn" onclick_shared={queue_action(&state.actions, ACT_DRAWER_TOGGLE)}>
                 {icon_sidebar_toggle()}
                 <span class="tool-label">"Drawer"</span>
             </button>
@@ -1000,25 +1004,9 @@ fn build_tool_rail_2d(state: &CssEditorState) -> Node {
     };
     ui! {
         <aside id="rail-2d" class="tool-rail tool-rail-2d">
-            <button class={cls("Edit")} onclick_shared={queue_action(&state.actions, ACT_TOOL_EDIT2D)} title="Inspect Boundary Edge (Z / A)">
+            <button class={cls("Edit")} onclick_shared={queue_action(&state.actions, ACT_TOOL_EDIT2D)}>
                 {icon_edit_2d()}
                 <span class="tool-label">"Edit"</span>
-            </button>
-            <button class={cls("Rect")} onclick_shared={queue_action(&state.actions, ACT_TOOL_RECT2D)} title="Rectangle Pattern (S)">
-                {icon_rect_2d()}
-                <span class="tool-label">"Rect"</span>
-            </button>
-            <button class={cls("Pen")} onclick_shared={queue_action(&state.actions, ACT_TOOL_PEN2D)} title="Polygon Pattern (H)">
-                {icon_polygon_2d()}
-                <span class="tool-label">"Pen"</span>
-            </button>
-            <button class={cls("Corner")} onclick_shared={queue_action(&state.actions, ACT_TOOL_CORNER2D)} title="Corner Rounding (C)">
-                {icon_corner_2d()}
-                <span class="tool-label">"Corner"</span>
-            </button>
-            <button class={cls("Measure")} onclick_shared={queue_action(&state.actions, ACT_TOOL_MEASURE2D)} title="2D Pattern Dimensions (M)">
-                {icon_measure_2d()}
-                <span class="tool-label">"Measure"</span>
             </button>
         </aside>
     }
@@ -1041,28 +1029,19 @@ fn build_left_drawer(state: &CssEditorState) -> Node {
         "drawer-btn"
     };
 
-    let wire_label = if state.wire {
-        "Wireframe: ON"
-    } else {
-        "Wireframe: OFF"
-    };
-    let shaded_label = if state.shaded {
-        "Shaded: ON"
-    } else {
-        "Shaded: OFF"
-    };
-    let collider_label = if state.collider {
-        "Collider: ON"
-    } else {
-        "Collider: OFF"
+    let toggle = |on: bool| {
+        if on {
+            "drawer-btn active"
+        } else {
+            "drawer-btn"
+        }
     };
 
     ui! {
         <aside class="left-drawer">
-            <div class="drawer-header">"SCENE & DISPLAY"</div>
             <div class="drawer-content">
                 <div class="drawer-section">
-                    <span class="section-label">"Reference Benchmark Scene"</span>
+                    <span class="section-label">"Scene"</span>
                     <button id="scene-sphere-btn" class={sphere_class} onclick_shared={queue_action(&state.actions, ACT_SCENE_SPHERE)}>
                         "Sphere Benchmark"
                     </button>
@@ -1071,14 +1050,10 @@ fn build_left_drawer(state: &CssEditorState) -> Node {
                     </button>
                 </div>
                 <div class="drawer-section">
-                    <span class="section-label">"Display Toggles"</span>
-                    <button class="drawer-btn" onclick_shared={queue_action(&state.actions, ACT_TOGGLE_WIRE)}>{wire_label}</button>
-                    <button class="drawer-btn" onclick_shared={queue_action(&state.actions, ACT_TOGGLE_SHADED)}>{shaded_label}</button>
-                    <button class="drawer-btn" onclick_shared={queue_action(&state.actions, ACT_TOGGLE_COLLIDER)}>{collider_label}</button>
-                </div>
-                <div class="drawer-section">
-                    <span class="section-label">"Camera Orbit Hint"</span>
-                    <p class="drawer-hint">"Drag mouse on 3D viewport to orbit. Mouse wheel to zoom."</p>
+                    <span class="section-label">"Display"</span>
+                    <button id="toggle-wire-btn" class={toggle(state.wire)} onclick_shared={queue_action(&state.actions, ACT_TOGGLE_WIRE)}>"Wireframe"</button>
+                    <button id="toggle-shaded-btn" class={toggle(state.shaded)} onclick_shared={queue_action(&state.actions, ACT_TOGGLE_SHADED)}>"Shaded"</button>
+                    <button id="toggle-collider-btn" class={toggle(state.collider)} onclick_shared={queue_action(&state.actions, ACT_TOGGLE_COLLIDER)}>"Collider"</button>
                 </div>
             </div>
         </aside>
@@ -1099,10 +1074,6 @@ fn build_stage(state: &CssEditorState) -> Node {
 fn build_3d_viewport(_state: &CssEditorState) -> Node {
     ui! {
         <div id="viewport-3d" class="viewport-container">
-            <div class="viewport-header">
-                <span class="viewport-title">"3D CLOTH VIEWPORT"</span>
-                <span class="viewport-sub">"USD native 3D viewport"</span>
-            </div>
             <div class="canvas-area">
                 <div id="viewport-3d-scene" class="viewport"></div>
             </div>
@@ -1112,23 +1083,20 @@ fn build_3d_viewport(_state: &CssEditorState) -> Node {
 
 fn build_2d_viewport(state: &CssEditorState) -> Node {
     let (svg_nodes, view_box) = render_2d_pattern_svg(state);
-    let edge_hint = state
-        .selected_edge
-        .map_or("Click edge to select".to_string(), |e| {
-            let p = &state.active.pattern;
-            let mm = if e % 2 == 0 {
-                p.width * 1000.0
-            } else {
-                p.height * 1000.0
-            };
-            format!("Edge {} selected: {:.0} mm", e + 1, mm)
-        });
+    let edge_value = state.selected_edge.map_or_else(String::new, |e| {
+        let p = &state.active.pattern;
+        let mm = if e % 2 == 0 {
+            p.width * 1000.0
+        } else {
+            p.height * 1000.0
+        };
+        format!("Edge {}: {:.0} mm", e + 1, mm)
+    });
 
     ui! {
         <div id="viewport-2d" class="viewport-container">
             <div class="viewport-header">
-                <span class="viewport-title">"2D REST PATTERN"</span>
-                <span class="viewport-sub">{edge_hint}</span>
+                <span id="selected-edge-length" class="viewport-sub">{edge_value}</span>
             </div>
             <div class="canvas-area">
                 <svg viewBox={view_box} preserveAspectRatio="xMidYMid meet" class="svg-canvas">
@@ -1215,12 +1183,15 @@ fn build_tab_objects(state: &CssEditorState) -> Node {
                 <span class="prop-label">"Fixed Pins"</span>
                 <span class="prop-value">{format!("{pins}")}</span>
             </div>
-            <div class="prop-row">
-                <span class="prop-label">"Selected Edge"</span>
-                <span class="prop-value">
-                    {state.selected_edge.map_or("None".to_string(), |e| format!("Edge {}", e + 1))}
-                </span>
-            </div>
+            {match state.selected_edge {
+                Some(e) => ui! {
+                    <div class="prop-row">
+                        <span class="prop-label">"Selected Edge"</span>
+                        <span class="prop-value">{format!("Edge {}", e + 1)}</span>
+                    </div>
+                },
+                None => ui! { <span class="hidden" /> },
+            }}
             <button class="action-btn" onclick_shared={queue_action(&state.actions, ACT_EDGE_SELECT_NEXT)}>"Select Next Boundary Edge"</button>
         </div>
     }
@@ -1267,13 +1238,30 @@ fn build_tab_simulation(state: &CssEditorState) -> Node {
     let s = &state.active.solver;
     let dt_str = format!("{:.3} s ({:.1} Hz)", s.dt, 1.0 / s.dt);
     let tol_str = format!("{:.1e}", s.absolute_tolerance);
-    let last_pen = state.metrics.as_ref().map_or("0.0 mm".to_string(), |m| {
-        format!("{:.3} mm", m.max_vertex_penetration_m * 1000.0)
-    });
-    let last_res = state
-        .metrics
-        .as_ref()
-        .map_or("N/A".to_string(), |m| format!("{:.1e}", m.residual_rms_n));
+    // Measured rows appear only once a step has produced them.
+    let mut measured: Vec<(&'static str, String)> = Vec::new();
+    if let Some(m) = &state.metrics {
+        measured.push(("Last Residual", format!("{:.1e} N", m.residual_rms_n)));
+        measured.push((
+            "Max Penetration",
+            format!("{:.3} mm", m.max_vertex_penetration_m * 1000.0),
+        ));
+    }
+    if let Some((gap_m, force_n)) = state.al_diagnostics {
+        measured.push(("Gap Residual", format!("{gap_m:.2e} m")));
+        measured.push(("Force Max", format!("{force_n:.2e} N")));
+    }
+    let measured: Vec<Node> = measured
+        .into_iter()
+        .map(|(label, value)| {
+            ui! {
+                <div class="prop-row">
+                    <span class="prop-label">{label}</span>
+                    <span class="prop-value">{value}</span>
+                </div>
+            }
+        })
+        .collect();
 
     ui! {
         <div class="tab-panel">
@@ -1294,14 +1282,7 @@ fn build_tab_simulation(state: &CssEditorState) -> Node {
                 <span class="prop-label">"Tolerance"</span>
                 <span class="prop-value">{tol_str}</span>
             </div>
-            <div class="prop-row">
-                <span class="prop-label">"Last Residual"</span>
-                <span class="prop-value">{last_res}</span>
-            </div>
-            <div class="prop-row">
-                <span class="prop-label">"Max Penetration"</span>
-                <span class="prop-value">{last_pen}</span>
-            </div>
+            {measured}
         </div>
     }
 }
@@ -1315,10 +1296,7 @@ fn build_mesh_preparation_accordion(state: &CssEditorState) -> Node {
 
     ui! {
         <div class="accordion-section">
-            <h4 class="accordion-title">"Physics-inspired mesh preparation"</h4>
-            <p class="accordion-sub">
-                "Build before simulating. Bending and grain come from Fabric settings; E is an explicit sizing estimate."
-            </p>
+            <h4 class="accordion-title">"Mesh Preparation"</h4>
             <div class="prep-inputs">
                 <div class="prop-row">
                     <span class="prop-label">"Warp E (Pa)"</span>
@@ -1351,37 +1329,36 @@ fn build_mesh_preparation_accordion(state: &CssEditorState) -> Node {
 }
 
 fn build_status_bar(state: &CssEditorState) -> Node {
-    let max_pen_mm = state
-        .metrics
-        .as_ref()
-        .map_or(0.0, |m| m.max_vertex_penetration_m * 1000.0);
-    let residual = state.metrics.as_ref().map_or(0.0, |m| m.residual_rms_n);
-
-    let step_info = if state.gpu_sim {
-        format!(
-            "Step: {} | computation: {:.1} ms | Residual: unavailable | Penetration audit: unavailable",
-            state.step_count, state.step_ms
-        )
-    } else {
-        format!(
-            "Step: {} | dt: {:.1} ms | Residual: {:.1e} | Max Pen: {:.3} mm",
-            state.step_count, state.step_ms, residual, max_pen_mm
-        )
-    };
+    let mut step_info = format!("Step: {} | {:.1} ms", state.step_count, state.step_ms);
+    if let Some(m) = &state.metrics {
+        step_info.push_str(&format!(
+            " | Residual: {:.1e} N | Max Pen: {:.3} mm",
+            m.residual_rms_n,
+            m.max_vertex_penetration_m * 1000.0
+        ));
+    }
     let mesh_info = format!(
         "Verts: {} | Tris: {}",
         state.mesh.uv.len(),
         state.mesh.triangles.len()
     );
+    // The dot carries the simulation state: running, stopped, or stopped by
+    // an error (whose text sits beside the transport controls).
+    let indicator_class = if state.errors.solver.is_some() {
+        "status-indicator error"
+    } else if state.playing {
+        "status-indicator running"
+    } else {
+        "status-indicator"
+    };
 
     ui! {
         <footer class="status-bar">
             <div class="status-left">
-                <span class="status-indicator">"●"</span>
-                <span class="status-message">{state.status_message.clone()}</span>
+                <span id="sim-state-indicator" class={indicator_class}>"●"</span>
+                <span class="status-step-info">{step_info}</span>
             </div>
             <div class="status-right">
-                <span class="status-step-info">{step_info}</span>
                 <span class="status-mesh-info">{mesh_info}</span>
             </div>
         </footer>
@@ -1393,80 +1370,66 @@ fn build_command_palette_overlay(state: &CssEditorState) -> Node {
         return ui! { <div id="command-palette-container"></div> };
     }
 
+    // Names match the buttons; shortcuts are only keys handle_editor_event binds.
+    let (play_icon, play_name) = if state.playing {
+        (icon_pause(), "Pause")
+    } else {
+        (icon_play(), "Play")
+    };
+    let theme_icon = if state.theme == Theme::Dark {
+        icon_sun()
+    } else {
+        icon_moon()
+    };
+    let commands: Vec<(u64, Node, &'static str, Option<&'static str>)> = vec![
+        (ACT_PLAY_PAUSE, play_icon, play_name, Some("Space")),
+        (ACT_STEP, icon_step(), "Step", None),
+        (ACT_RESET, icon_reset(), "Reset", None),
+        (ACT_SAVE, icon_save(), "Save", Some("Ctrl+S")),
+        (ACT_EXPORT_OBJ, icon_export(), "Export OBJ", None),
+        (ACT_SCENE_SPHERE, icon_circle_2d(), "Sphere Benchmark", None),
+        (ACT_SCENE_HANG, icon_pin(), "Hanging Pins", None),
+        (
+            ACT_REMESH_RESET,
+            icon_polygon_2d(),
+            "Remesh and reset",
+            None,
+        ),
+        (
+            ACT_UNIFORM_RESET,
+            icon_view_split(),
+            "Use uniform grid and reset",
+            None,
+        ),
+        (ACT_THEME_TOGGLE, theme_icon, "Theme", None),
+    ];
+    let items: Vec<Node> = commands
+        .into_iter()
+        .map(|(action, icon, name, shortcut)| {
+            let shortcut = match shortcut {
+                Some(key) => ui! { <span class="command-shortcut">{key}</span> },
+                None => ui! { <span class="hidden" /> },
+            };
+            ui! {
+                <button class="palette-item" onclick_shared={queue_action(&state.actions, action)}>
+                    <div class="item-left">
+                        {icon}
+                        <span>{name}</span>
+                    </div>
+                    {shortcut}
+                </button>
+            }
+        })
+        .collect();
+
     ui! {
         <div id="command-palette-container" class="command-palette-backdrop">
             <div class="command-palette-modal">
                 <div class="palette-header">
-                    <span class="palette-title">"Command Palette"</span>
-                    <button class="palette-close-btn" onclick_shared={queue_action(&state.actions, ACT_PALETTE_TOGGLE)}>"✕"</button>
+                    <button id="palette-close-btn" class="palette-close-btn" onclick_shared={queue_action(&state.actions, ACT_PALETTE_TOGGLE)} title="Close" aria-label="Close">"✕"</button>
                 </div>
                 <div class="palette-items">
-                    <button class="palette-item" onclick_shared={queue_action(&state.actions, ACT_PLAY_PAUSE)}>
-                        <div class="item-left">
-                            {if state.playing { icon_pause() } else { icon_play() }}
-                            <span>"Toggle Simulation"</span>
-                        </div>
-                        <span class="command-shortcut">"Space"</span>
-                    </button>
-                    <button class="palette-item" onclick_shared={queue_action(&state.actions, ACT_STEP)}>
-                        <div class="item-left">
-                            {icon_step()}
-                            <span>"Step Simulation"</span>
-                        </div>
-                        <span class="command-shortcut">"S"</span>
-                    </button>
-                    <button class="palette-item" onclick_shared={queue_action(&state.actions, ACT_RESET)}>
-                        <div class="item-left">
-                            {icon_reset()}
-                            <span>"Reset Simulation"</span>
-                        </div>
-                        <span class="command-shortcut">"R"</span>
-                    </button>
-                    <button class="palette-item" onclick_shared={queue_action(&state.actions, ACT_SAVE)}>
-                        <div class="item-left">
-                            {icon_save()}
-                            <span>"Save Project"</span>
-                        </div>
-                        <span class="command-shortcut">"Ctrl+S"</span>
-                    </button>
-                    <button class="palette-item" onclick_shared={queue_action(&state.actions, ACT_EXPORT_OBJ)}>
-                        <div class="item-left">
-                            {icon_export()}
-                            <span>"Export OBJ"</span>
-                        </div>
-                        <span class="command-shortcut">"Ctrl+E"</span>
-                    </button>
-                    <button class="palette-item" onclick_shared={queue_action(&state.actions, ACT_SCENE_SPHERE)}>
-                        <div class="item-left">
-                            {icon_circle_2d()}
-                            <span>"Scene: Sphere Benchmark"</span>
-                        </div>
-                    </button>
-                    <button class="palette-item" onclick_shared={queue_action(&state.actions, ACT_SCENE_HANG)}>
-                        <div class="item-left">
-                            {icon_pin()}
-                            <span>"Scene: Hanging Pins"</span>
-                        </div>
-                    </button>
-                    <button class="palette-item" onclick_shared={queue_action(&state.actions, ACT_REMESH_RESET)}>
-                        <div class="item-left">
-                            {icon_polygon_2d()}
-                            <span>"Remesh and Reset"</span>
-                        </div>
-                    </button>
-                    <button class="palette-item" onclick_shared={queue_action(&state.actions, ACT_UNIFORM_RESET)}>
-                        <div class="item-left">
-                            {icon_view_split()}
-                            <span>"Use Uniform Grid and Reset"</span>
-                        </div>
-                    </button>
-                    <button class="palette-item" onclick_shared={queue_action(&state.actions, ACT_THEME_TOGGLE)}>
-                        <div class="item-left">
-                            {if state.theme == Theme::Dark { icon_sun() } else { icon_moon() }}
-                            <span>"Toggle Dark/Light Theme"</span>
-                        </div>
-                        <span class="command-shortcut">"T"</span>
-                    </button>
+                    {items}
                 </div>
             </div>
         </div>
@@ -1632,7 +1595,7 @@ pub fn create_editor_app<'a>(
     let usd_scene = cssimpler::renderer::gpu::usd::UsdScene::open(&preview_path)
         .expect("load generated USD viewport scene");
     if let Err(err) = marvelous_cloth::usd_scene::init_viewport_camera(&usd_scene, &state.camera) {
-        state.status_message = format!("USD camera init error: {err}");
+        eprintln!("USD camera init error: {err}");
     }
     state.usd_scene = Some(usd_scene.clone());
 
@@ -2109,7 +2072,7 @@ mod tests {
         );
 
         // Test Reset
-        app.state_mut().reset();
+        app.state_mut().reset().expect("reset rebuilds the project");
         assert_eq!(app.state().step_count, 0);
         assert!(app.state().metrics.is_none());
         assert_eq!(
@@ -2185,21 +2148,16 @@ mod tests {
             frame_index: frame,
         });
 
-        for (act, expected_tool) in [
-            (ACT_TOOL_RECT2D, "Rect"),
-            (ACT_TOOL_PEN2D, "Pen"),
-            (ACT_TOOL_CORNER2D, "Corner"),
-            (ACT_TOOL_MEASURE2D, "Measure"),
-            (ACT_TOOL_EDIT2D, "Edit"),
-        ] {
-            frame += 1;
-            app.state_mut().actions.fetch_or(act, Ordering::Relaxed);
-            app.frame(FrameInfo {
-                delta: Duration::from_millis(16),
-                frame_index: frame,
-            });
-            assert_eq!(app.state().active_2d_tool, expected_tool);
-        }
+        frame += 1;
+        app.state_mut()
+            .actions
+            .fetch_or(ACT_TOOL_EDIT2D, Ordering::Relaxed);
+        app.frame(FrameInfo {
+            delta: Duration::from_millis(16),
+            frame_index: frame,
+        });
+        assert_eq!(app.state().active_2d_tool, "Edit");
+        assert_eq!(app.state().selected_edge, Some(0));
 
         frame += 1;
         app.state_mut()
@@ -2277,5 +2235,76 @@ mod tests {
         assert!((app.state().camera.yaw - initial_yaw).abs() < 1e-6);
         assert!((app.state().camera.distance - initial_dist).abs() < 1e-6);
         assert_eq!(read_xform(app.state()), initial_xf);
+    }
+
+    #[test]
+    fn reference_editor_shows_errors_beside_controls_and_no_copy() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut state = CssEditorState::new(Project::default(), dir.path().join("out"));
+        let initial_tris = state.mesh.triangles.len();
+
+        // A project that cannot rebuild leaves the simulation alone and puts
+        // the reason beside the transport controls.
+        let version = state.active.version;
+        state.active.version = 999;
+        state.reset_from_transport();
+        let error = state.errors.solver.clone().expect("reset error is kept");
+        assert!(!error.is_empty() && !error.contains('\n'));
+        assert_eq!(state.mesh.triangles.len(), initial_tris);
+        let ui = format!("{:?}", build_editor_ui(&state));
+        assert!(ui.contains("solver-error") && ui.contains(&error));
+
+        // A failed remesh keeps the project consistent with the mesh on screen.
+        state.active.version = version;
+        state.mesh_prep_warp_e = "abc".into();
+        state.remesh_and_reset();
+        assert_eq!(
+            state.mesh_prep_error.as_deref(),
+            Some("Sizing values must be numbers")
+        );
+        assert!(state.active.physics_sizing.is_none());
+        state.reset_from_transport();
+        assert_eq!(state.errors.solver, None, "a good rebuild clears the error");
+
+        // Toggles show their state by highlight, not by ON/OFF text.
+        state.wire = true;
+        state.shaded = false;
+        let drawer = build_left_drawer(&state);
+        let classes = |id: &str| -> Vec<String> {
+            fn find(node: &Node, id: &str) -> Option<Vec<String>> {
+                let Node::Element(el) = node else {
+                    return None;
+                };
+                if el.id.as_deref() == Some(id) {
+                    return Some(el.classes.clone());
+                }
+                el.children.iter().find_map(|c| find(c, id))
+            }
+            find(&drawer, id).expect("toggle is rendered")
+        };
+        assert!(classes("toggle-wire-btn").contains(&"active".to_string()));
+        assert!(!classes("toggle-shaded-btn").contains(&"active".to_string()));
+
+        state.command_palette_open = true;
+        state.selected_edge = None;
+        let ui = format!("{:?}", build_editor_ui(&state));
+        for gone in [
+            "Reference Editor",
+            ": ON",
+            ": OFF",
+            "Orbit Hint",
+            "Drag mouse",
+            "Build before simulating",
+            "Click edge",
+            "unavailable",
+            "(experimental)",
+            "Command Palette",
+            "\"Rect\"",
+            "\"Pen\"",
+            "Ctrl+E",
+            "N/A",
+        ] {
+            assert!(!ui.contains(gone), "reference editor still shows {gone:?}");
+        }
     }
 }
