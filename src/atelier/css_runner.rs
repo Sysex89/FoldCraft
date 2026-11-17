@@ -1221,11 +1221,12 @@ pub fn viewport_3d_rect(state: &CssRunnerState) -> Rect2d {
         ViewLayoutMode::Split => stage_w * 0.5,
     };
 
+    // The 3D viewport has no header: the canvas fills the stage height.
     Rect2d {
         x: left_w,
-        y: body_y + 32.0,
+        y: body_y,
         w: vp3d_w,
-        h: (body_h - 32.0).max(1.0),
+        h: body_h,
     }
 }
 
@@ -4653,10 +4654,6 @@ fn build_runner_stage(state: &CssRunnerState) -> Node {
 fn build_runner_3d_viewport(_state: &CssRunnerState) -> Node {
     ui! {
         <div id="viewport-3d" class="viewport-container">
-            <div class="viewport-header">
-                <span class="viewport-title">"3D Garment & Avatar"</span>
-                <span class="viewport-sub">"USD native 3D viewport (VBD + OGC)"</span>
-            </div>
             <div class="canvas-area">
                 <div id="runner-viewport-3d-scene" class="viewport"></div>
             </div>
@@ -4669,51 +4666,9 @@ pub fn build_runner_2d_viewport(state: &CssRunnerState) -> Node {
     let (_canvas_rect, svg_rect) = compute_2d_viewport_rects(state);
     let svg_w = format!("{:.1}px", svg_rect.w);
     let svg_h = format!("{:.1}px", svg_rect.h);
-    let connected = compute_connected_2d_highlight(state);
-
-    let panels = &state.project.template.panels;
-    let selected_panel = panels.get(state.selected_piece_index);
-    let selected_name = selected_panel.map_or("None", |p| p.name.as_str());
-    let (w_mm, h_mm) = selected_panel.map_or((0.0, 0.0), |p| {
-        let e = panel_extent(p);
-        (e.width_m * 1000.0, e.height_m * 1000.0)
-    });
 
     let zoom_pct = (state.board_2d_zoom * 100.0).round() as i32;
-    let linked_str = if connected.connected_panels.is_empty() {
-        String::new()
-    } else {
-        let ids: Vec<&str> = connected
-            .connected_panels
-            .iter()
-            .map(|s| s.as_str())
-            .collect();
-        format!(" +{}", ids.join(","))
-    };
-    let sel_pts = effective_selected_points(state);
-    let has_selected_pts = !sel_pts.is_empty();
-    let sub_detail = if sel_pts.len() > 1 {
-        format!(" · {} corners selected{linked_str}", sel_pts.len())
-    } else if let Some((pid, pt_idx)) = sel_pts.into_iter().next() {
-        let edge_label = state
-            .project
-            .template
-            .panels
-            .iter()
-            .find(|p| p.id == pid)
-            .and_then(|p| p.polygon.as_ref())
-            .and_then(|poly| poly.edges.get(pt_idx))
-            .map_or("?", |e| e.as_str());
-        format!(" · Corner #{pt_idx} ({edge_label}){linked_str}")
-    } else if let Some((ref _pid, ref ename)) = state.selected_2d_edge {
-        format!(" · Edge {ename}{linked_str}")
-    } else {
-        String::new()
-    };
-    let sub_text = format!(
-        "Tool: {} · Zoom: {}% · Selected: {} ({:.0}×{:.0} mm){}",
-        state.active_2d_tool, zoom_pct, selected_name, w_mm, h_mm, sub_detail
-    );
+    let has_selected_pts = !effective_selected_points(state).is_empty();
     let corner_menu_active =
         state.active_2d_tool == "Corner" || (state.corner_preview_active && has_selected_pts);
     let corner_group_class = if corner_menu_active {
@@ -4767,52 +4722,52 @@ pub fn build_runner_2d_viewport(state: &CssRunnerState) -> Node {
     let curve_class = pill("cad-2d-pill", has_round_target);
 
     let undo_btn = ui! {
-        <button id="cad-undo-btn" class={undo_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::Undo2d)} title="Undo (Ctrl+Z)">"Undo"</button>
+        <button id="cad-undo-btn" class={undo_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::Undo2d)}>"Undo"</button>
     };
     let redo_btn = ui! {
-        <button id="cad-redo-btn" class={redo_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::Redo2d)} title="Redo (Ctrl+Shift+Z)">"Redo"</button>
+        <button id="cad-redo-btn" class={redo_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::Redo2d)}>"Redo"</button>
     };
     let mode_radius_btn = ui! {
-        <button id="cad-corner-radius-mode" class={radius_mode_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::SetCornerMode(true))} title="Circular fillet mode">"Radius"</button>
+        <button id="cad-corner-radius-mode" class={radius_mode_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::SetCornerMode(true))}>"Radius"</button>
     };
     let mode_shape_btn = ui! {
-        <button id="cad-corner-shape-mode" class={shape_mode_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::SetCornerMode(false))} title="Shaped tension fillet mode">"Shape"</button>
+        <button id="cad-corner-shape-mode" class={shape_mode_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::SetCornerMode(false))}>"Shape"</button>
     };
     let radius_dec_btn = ui! {
-        <button id="cad-radius-dec" class="cad-2d-pill" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::AdjustCornerRadiusMm(-2.0))} title="Decrease corner radius">"-2"</button>
+        <button id="cad-radius-dec" class="cad-2d-pill" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::AdjustCornerRadiusMm(-2.0))} title="Decrease radius" aria-label="Decrease radius">"−"</button>
     };
     let radius_val = ui! {
         <span id="cad-radius-readout" class="cad-2d-value">{format!("{:.1} mm", state.corner_radius_mm)}</span>
     };
     let radius_inc_btn = ui! {
-        <button id="cad-radius-inc" class="cad-2d-pill" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::AdjustCornerRadiusMm(2.0))} title="Increase corner radius">"+2"</button>
+        <button id="cad-radius-inc" class="cad-2d-pill" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::AdjustCornerRadiusMm(2.0))} title="Increase radius" aria-label="Increase radius">"+"</button>
     };
     let tension_dec_btn = ui! {
-        <button id="cad-tension-dec" class="cad-2d-pill" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::AdjustCornerTension(-0.05))} title="Decrease tension">"T-"</button>
+        <button id="cad-tension-dec" class="cad-2d-pill" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::AdjustCornerTension(-0.05))} title="Decrease tension" aria-label="Decrease tension">"−"</button>
     };
     let tension_val = ui! {
-        <span id="cad-tension-readout" class="cad-2d-value">{format!("{:.2}", state.corner_tension)}</span>
+        <span id="cad-tension-readout" class="cad-2d-value">{format!("T {:.2}", state.corner_tension)}</span>
     };
     let tension_inc_btn = ui! {
-        <button id="cad-tension-inc" class="cad-2d-pill" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::AdjustCornerTension(0.05))} title="Increase tension">"T+"</button>
+        <button id="cad-tension-inc" class="cad-2d-pill" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::AdjustCornerTension(0.05))} title="Increase tension" aria-label="Increase tension">"+"</button>
     };
     let apply_round_btn = ui! {
-        <button id="cad-apply-round-btn" class={round_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::ApplyCornerRoundSelected)} title="Round selected corner (Enter)">"Round"</button>
+        <button id="cad-apply-round-btn" class={round_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::ApplyCornerRoundSelected)}>"Round"</button>
     };
     let rule_sharp_btn = ui! {
-        <button id="cad-rule-sharp" class={sharp_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::SetCornerRule(CornerRule::Sharp))} title="Sharp independent handles">"Sharp"</button>
+        <button id="cad-rule-sharp" class={sharp_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::SetCornerRule(CornerRule::Sharp))}>"Sharp"</button>
     };
     let rule_smooth_btn = ui! {
-        <button id="cad-rule-smooth" class={smooth_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::SetCornerRule(CornerRule::Smooth))} title="Smooth G1 collinear handles">"Smooth"</button>
+        <button id="cad-rule-smooth" class={smooth_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::SetCornerRule(CornerRule::Smooth))}>"Smooth"</button>
     };
     let rule_sym_btn = ui! {
-        <button id="cad-rule-sym" class={sym_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::SetCornerRule(CornerRule::Symmetric))} title="Symmetric equal-length handles">"Sym"</button>
+        <button id="cad-rule-sym" class={sym_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::SetCornerRule(CornerRule::Symmetric))}>"Sym"</button>
     };
     let curve_on_btn = ui! {
-        <button id="cad-curve-on-btn" class={curve_class.clone()} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::ToggleSelectedCurve(true))} title="Convert selected boundary/corner to cubic Bézier">"Curve"</button>
+        <button id="cad-curve-on-btn" class={curve_class.clone()} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::ToggleSelectedCurve(true))}>"Curve"</button>
     };
     let curve_off_btn = ui! {
-        <button id="cad-curve-off-btn" class={curve_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::ToggleSelectedCurve(false))} title="Straighten selected boundary/corner">"Straight"</button>
+        <button id="cad-curve-off-btn" class={curve_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::ToggleSelectedCurve(false))}>"Straight"</button>
     };
 
     let (_vp2d_x, vp2d_w) = viewport_2d_span_x(state);
@@ -4932,18 +4887,17 @@ pub fn build_runner_2d_viewport(state: &CssRunnerState) -> Node {
         <div id="viewport-2d" class="viewport-container">
             <div class="viewport-header">
                 <div class="viewport-header-left">
-                    <span class="viewport-title">"2D Pattern Board"</span>
-                    <span class="viewport-sub">{sub_text}</span>
+                    <span id="board-zoom" class="viewport-sub">{format!("{zoom_pct}%")}</span>
                 </div>
                 <div class="viewport-tools">
                     {match measure_readout_mm(state) {
                         Some(mm) => ui! { <span id="measure-readout" class="cad-2d-value">{format!("{mm:.1} mm")}</span> },
                         None => ui! { <span class="hidden" /> },
                     }}
-                    <button class="viewport-tool-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_2D_ZOOM_IN)} title="Zoom In (+)">"+"</button>
-                    <button class="viewport-tool-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_2D_ZOOM_OUT)} title="Zoom Out (-)">"-"</button>
-                    <button class="viewport-tool-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_2D_FIT)} title="Fit Board (0)">"Fit"</button>
-                    <button class="viewport-tool-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_2D_NEXT_PIECE)} title="Cycle Piece (])">"Next Piece ▾"</button>
+                    <button class="viewport-tool-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_2D_ZOOM_IN)} title="Zoom in" aria-label="Zoom in">"+"</button>
+                    <button class="viewport-tool-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_2D_ZOOM_OUT)} title="Zoom out" aria-label="Zoom out">"−"</button>
+                    <button class="viewport-tool-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_2D_FIT)}>"Fit"</button>
+                    <button class="viewport-tool-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_2D_NEXT_PIECE)}>"Next Piece"</button>
                 </div>
             </div>
             {cad_bar}
@@ -7080,6 +7034,15 @@ mod tests {
             usd_bounds.width > 100.0 && usd_bounds.height > 100.0,
             "USD viewport must have drawable area: {usd_bounds:?}"
         );
+        // Pointer routing uses viewport_3d_rect; it must match the laid-out host.
+        let routed = viewport_3d_rect(app.state());
+        assert!(
+            (routed.y - usd_bounds.y).abs() <= 1.5
+                && (routed.h - usd_bounds.height).abs() <= 1.5
+                && (routed.x - usd_bounds.x).abs() <= 1.5
+                && (routed.w - usd_bounds.width).abs() <= 1.5,
+            "routed 3D rect {routed:?} differs from USD host {usd_bounds:?}"
+        );
         assert!(app.find_element_bounds_by_id("#viewport-2d").is_some());
         assert!(app.find_element_bounds_by_id("#right-dock").is_some());
 
@@ -9088,5 +9051,28 @@ mod top_bar_text_tests {
             assert_eq!(tooltip_policy_violations(&rail), Vec::<String>::new());
         }
         assert!(format!("{:?}", build_runner_3d_rail(&state)).contains("\"Reset Camera\""));
+
+        // The 2D viewport: labelled pills carry no tooltip, the glyph-only
+        // steppers and zoom buttons carry their name, and the header holds the
+        // zoom value instead of a title and selection echo.
+        for width in [1600.0, 1100.0, 800.0] {
+            state.window_size = (width, 980.0);
+            let board = build_runner_2d_viewport(&state);
+            assert_eq!(tooltip_policy_violations(&board), Vec::<String>::new());
+            let text = format!("{board:?}");
+            for gone in [
+                "2D Pattern Board",
+                "Tool:",
+                "Selected:",
+                "▾",
+                "\"T-\"",
+                "\"-2\"",
+            ] {
+                assert!(!text.contains(gone), "2D viewport still shows {gone:?}");
+            }
+            assert!(text.contains("100%"));
+        }
+        let viewport_3d = format!("{:?}", build_runner_3d_viewport(&state));
+        assert!(!viewport_3d.contains("viewport-title") && !viewport_3d.contains("USD native"));
     }
 }
