@@ -106,8 +106,8 @@ impl Project {
     /// Stores the editable rest model and settings, not a transient simulation cache.
     pub fn save(&self, path: &Path) -> Result<(), String> {
         self.build()?;
-        let data = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        fs::write(path, data).map_err(|e| e.to_string())
+        let data = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
+        crate::document::atomic_write(path, &data)
     }
 }
 

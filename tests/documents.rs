@@ -78,3 +78,43 @@ fn atomic_write_keeps_ordinary_and_existing_permissions() {
         assert_eq!(fs::read(&file).unwrap(), b"replacement");
     }
 }
+
+/// A template or legacy project save replaces the file instead of rewriting it
+/// in place: a second link to the previous file still holds its complete bytes,
+/// which a truncating write through the shared inode would have destroyed.
+#[cfg(unix)]
+#[test]
+fn template_and_project_saves_replace_the_previous_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let previous = b"previous valid bytes";
+    let seed = |name: &str| {
+        let file = dir.path().join(name);
+        fs::write(&file, previous).unwrap();
+        let link = dir.path().join(format!("{name}.previous"));
+        fs::hard_link(&file, &link).unwrap();
+        (file, link)
+    };
+
+    let (file, link) = seed("template.json");
+    let template = GarmentTemplate::two_panel_demo();
+    template.save(&file).unwrap();
+    assert_eq!(fs::read(&link).unwrap(), previous);
+    assert_eq!(
+        fs::read(&file).unwrap(),
+        serde_json::to_vec_pretty(&template).unwrap()
+    );
+    GarmentTemplate::load(&file).unwrap();
+
+    let (file, link) = seed("project.json");
+    let project = marvelous_cloth::project::Project::default();
+    project.save(&file).unwrap();
+    assert_eq!(fs::read(&link).unwrap(), previous);
+    assert_eq!(
+        fs::read(&file).unwrap(),
+        serde_json::to_vec_pretty(&project).unwrap()
+    );
+    marvelous_cloth::project::Project::load(&file).unwrap();
+
+    // No temporary file is left beside the two documents and their links.
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 4);
+}
