@@ -767,30 +767,11 @@ pub fn layout(template: &GarmentTemplate, index: usize) -> DVec2 {
         )
     })
 }
+/// Whether an edit from `a` to `b` may keep the current drape. See
+/// [`GarmentTemplate::physical_projection`] for the fields this ignores.
 pub fn same_physics(a: &GarmentTemplate, b: &GarmentTemplate) -> bool {
-    let without_layout = |t: &GarmentTemplate| {
-        let mut t = t.clone();
-        t.mirror_links.clear();
-        t.fabric_appearance.clear();
-        t.graphics.clear();
-        t.trims.clear();
-        for p in &mut t.panels {
-            p.layout_2d = None;
-            p.layout_rotation_degrees = 0.;
-            // A required boundary length is a 2D specification, not rest
-            // geometry: storing or clearing it must not invalidate the drape.
-            if let Some(polygon) = p.polygon.as_mut() {
-                polygon.target_lengths.clear();
-                // Markings (seam allowance, notches) are draft data too: adding,
-                // moving or deleting one never rebuilds the physical state.
-                polygon.seam_allowances.clear();
-                polygon.notches.clear();
-                polygon.measurements.clear();
-            }
-        }
-        serde_json::to_vec(&t).unwrap()
-    };
-    without_layout(a) == without_layout(b)
+    let physical = |t: &GarmentTemplate| serde_json::to_vec(&t.physical_projection()).unwrap();
+    physical(a) == physical(b)
 }
 /// A strict nonphysical draft change, distinct from other board edits: fabric
 /// optics, graphics, trims and per-boundary seam allowances/notches. Installing

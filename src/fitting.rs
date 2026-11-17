@@ -262,22 +262,9 @@ fn mesh_signature(template: &GarmentTemplate, g: &CompiledGarment) -> Result<Str
             hash = hash.wrapping_mul(0x100000001b3);
         }
     };
-    let mut physical_template = template.clone();
-    physical_template.mirror_links.clear();
-    physical_template.fabric_appearance.clear();
-    physical_template.graphics.clear();
-    physical_template.trims.clear();
-    for panel in &mut physical_template.panels {
-        panel.layout_2d = None;
-        panel.layout_rotation_degrees = 0.;
-        if let Some(polygon) = panel.polygon.as_mut() {
-            polygon.target_lengths.clear();
-            polygon.seam_allowances.clear();
-            polygon.notches.clear();
-            polygon.measurements.clear();
-        }
-    }
-    append(&serde_json::to_vec(&physical_template).map_err(|e| e.to_string())?);
+    // Same projection as `authoring::same_physics`: an edit that keeps the
+    // drape must also keep the signature, or the saved cache reads as stale.
+    append(&serde_json::to_vec(&template.physical_projection()).map_err(|e| e.to_string())?);
     for p in &g.mesh.uv {
         append(&p.x.to_le_bytes());
         append(&p.y.to_le_bytes());
@@ -288,4 +275,143 @@ fn mesh_signature(template: &GarmentTemplate, g: &CompiledGarment) -> Result<Str
         }
     }
     Ok(format!("{hash:016x}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        authoring::same_physics,
+        garment::{
+            appearance::FabricAppearance,
+            graphics::{GraphicPlacement, GraphicSide},
+            markings::{Notch, NotchKind},
+            polygon::{MeasurementAnchor, PatternMeasurement},
+            shapes::MirrorAxis,
+            template::MirrorLink,
+            trims::{Trim, TrimKind},
+        },
+    };
+    use glam::DVec2;
+
+    fn tshirt() -> GarmentTemplate {
+        GarmentTemplate::load(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/templates/tshirt.json"),
+        )
+        .unwrap()
+    }
+
+    type Edit = (&'static str, fn(&mut GarmentTemplate));
+
+    /// Each edit touches one field that `physical_projection` clears.
+    const NON_PHYSICAL: &[Edit] = &[
+        ("mirror_links", |t| {
+            t.mirror_links.push(MirrorLink {
+                a: "front".into(),
+                b: "back".into(),
+                axis: MirrorAxis::X,
+            })
+        }),
+        ("fabric_appearance", |t| {
+            let id = t.fabrics[0].id.clone();
+            t.fabric_appearance.insert(id, FabricAppearance::default());
+        }),
+        ("graphics", |t| {
+            t.graphics.push(GraphicPlacement {
+                id: "logo".into(),
+                panel_id: "front".into(),
+                asset_id: "asset".into(),
+                center_m: DVec2::splat(0.1),
+                size_m: DVec2::splat(0.05),
+                rotation_degrees: 0.,
+                side: GraphicSide::Front,
+            })
+        }),
+        ("trims", |t| {
+            t.trims.push(Trim {
+                id: "button".into(),
+                panel_id: "front".into(),
+                kind: TrimKind::Button {
+                    center_m: DVec2::splat(0.1),
+                    diameter_m: 0.01,
+                },
+            })
+        }),
+        ("layout_2d", |t| {
+            t.panels[0].layout_2d = Some(DVec2::new(1.5, -0.25))
+        }),
+        ("layout_rotation_degrees", |t| {
+            t.panels[0].layout_rotation_degrees = 90.
+        }),
+        ("target_lengths", |t| {
+            polygon(t).target_lengths.insert("hem".into(), 0.5);
+        }),
+        ("seam_allowances", |t| {
+            polygon(t).seam_allowances.insert("hem".into(), 0.01);
+        }),
+        ("notches", |t| {
+            polygon(t)
+                .notches
+                .insert("hem".into(), vec![Notch::new(0.5, 0.005, NotchKind::V)]);
+        }),
+        ("measurements", |t| {
+            polygon(t).measurements.push(PatternMeasurement {
+                id: "hem-width".into(),
+                label: "Hem width".into(),
+                a: MeasurementAnchor {
+                    edge: "hem".into(),
+                    t: 0.,
+                },
+                b: MeasurementAnchor {
+                    edge: "hem".into(),
+                    t: 1.,
+                },
+            })
+        }),
+    ];
+
+    /// Negative controls: each changes the rest mesh or material binding.
+    const PHYSICAL: &[Edit] = &[
+        ("grain_degrees", |t| t.panels[0].grain_degrees += 15.),
+        ("polygon point", |t| polygon(t).points[0].x += 0.01),
+    ];
+
+    fn polygon(t: &mut GarmentTemplate) -> &mut crate::garment::polygon::PolygonPattern {
+        t.panels[0]
+            .polygon
+            .as_mut()
+            .expect("tshirt front is a polygon")
+    }
+
+    #[test]
+    fn non_physical_edits_keep_drape_and_cache_signature() {
+        let base = tshirt();
+        let garment = base.compile().unwrap();
+        let signature = mesh_signature(&base, &garment).unwrap();
+        for (field, edit) in NON_PHYSICAL {
+            let mut edited = base.clone();
+            edit(&mut edited);
+            assert_ne!(
+                serde_json::to_vec(&edited).unwrap(),
+                serde_json::to_vec(&base).unwrap(),
+                "{field}: the edit did not change the document"
+            );
+            assert!(same_physics(&base, &edited), "{field}: same_physics");
+            assert_eq!(
+                mesh_signature(&edited, &garment).unwrap(),
+                signature,
+                "{field}: mesh_signature"
+            );
+        }
+        for (field, edit) in PHYSICAL {
+            let mut edited = base.clone();
+            edit(&mut edited);
+            assert!(!same_physics(&base, &edited), "{field}: same_physics");
+            assert_ne!(
+                mesh_signature(&edited, &garment).unwrap(),
+                signature,
+                "{field}: mesh_signature"
+            );
+        }
+    }
 }
