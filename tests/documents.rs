@@ -55,3 +55,26 @@ fn failed_save_preserves_previous_document() {
     atomic_write(&file, b"replacement").unwrap();
     assert_eq!(fs::read(file).unwrap(), b"replacement");
 }
+
+/// A new document is as accessible as any other file the process creates, and
+/// replacing a document keeps the mode it already had.
+#[cfg(unix)]
+#[test]
+fn atomic_write_keeps_ordinary_and_existing_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |path: &std::path::Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    let dir = tempfile::tempdir().unwrap();
+    // The umask cannot be read without changing it, so a plain create in the
+    // same directory is the reference for a new file.
+    let plain = dir.path().join("plain.json");
+    fs::write(&plain, b"plain").unwrap();
+    let file = dir.path().join("document.json");
+    atomic_write(&file, b"first").unwrap();
+    assert_eq!(mode(&file), mode(&plain));
+    for existing in [0o600, 0o640, 0o664] {
+        fs::set_permissions(&file, fs::Permissions::from_mode(existing)).unwrap();
+        atomic_write(&file, b"replacement").unwrap();
+        assert_eq!(mode(&file), existing);
+        assert_eq!(fs::read(&file).unwrap(), b"replacement");
+    }
+}
