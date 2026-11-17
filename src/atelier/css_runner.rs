@@ -4107,6 +4107,51 @@ fn inline_error(id: &'static str, message: Option<&str>) -> Node {
     }
 }
 
+/// Solver names, identical in the picker and on its badge. The experimental
+/// barrier-AL backend is marked by the `experimental` class, not by words.
+const SOLVER_GPU_IPC: &str = "WGSL AVBD / IPC";
+const SOLVER_GPU_AL: &str = "WGSL AVBD / barrier AL";
+const SOLVER_CPU: &str = "CPU VBD / OGC";
+
+/// Tooltip rule for every button under `root`: a button with visible text has
+/// no `title`; an icon-only button has a `title` equal to its `aria-label`.
+/// Returns one description per violation.
+#[cfg(test)]
+pub(crate) fn tooltip_policy_violations(root: &Node) -> Vec<String> {
+    fn text(node: &Node) -> String {
+        match node {
+            Node::Text(t) => t.trim().to_string(),
+            Node::Element(el) => el.children.iter().map(text).collect(),
+        }
+    }
+    fn walk(node: &Node, out: &mut Vec<String>) {
+        let Node::Element(el) = node else {
+            return;
+        };
+        if el.tag == "button" {
+            let label = text(node);
+            let title = el.attribute("title");
+            let name = el.attribute("aria-label");
+            let id = el.id.clone().unwrap_or_default();
+            if !label.is_empty() && !label.chars().all(|c| !c.is_alphanumeric()) {
+                if let Some(title) = title {
+                    out.push(format!("#{id} '{label}' has tooltip '{title}'"));
+                }
+            } else if title.is_none() || title != name {
+                out.push(format!(
+                    "#{id} icon-only: title {title:?} must equal aria-label {name:?}"
+                ));
+            }
+        }
+        for child in &el.children {
+            walk(child, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, &mut out);
+    out
+}
+
 fn build_runner_top_bar(state: &CssRunnerState) -> Node {
     let play_label = if state.playing { "Pause" } else { "Play" };
     let play_class = if state.playing {
@@ -4127,48 +4172,42 @@ fn build_runner_top_bar(state: &CssRunnerState) -> Node {
         "clean-view-toggle"
     };
 
-    let (backend_class, backend_label) = if state.gpu_sim {
-        ("backend-badge gpu", state.contact_method.label())
-    } else {
-        ("backend-badge cpu", "CPU (OGC)")
-    };
-
-    let theme_label = match state.theme {
-        Theme::Dark => "Theme: Dark",
-        Theme::Light => "Theme: Light",
+    let (backend_class, backend_label) = match (state.gpu_sim, state.contact_method) {
+        (true, ContactMethod::Ipc) => ("backend-badge gpu", SOLVER_GPU_IPC),
+        (true, ContactMethod::BarrierAl) => ("backend-badge gpu experimental", SOLVER_GPU_AL),
+        (false, _) => ("backend-badge cpu", SOLVER_CPU),
     };
 
     ui! {
         <header id="top-bar" class="top-bar">
             <div class="top-bar-left">
-                <span class="app-title">"FoldCraft | Simulation Studio V2"</span>
                 <nav class="top-bar-menus">
-                    <button class="menu-item" onclick_shared={queue_action(&state.actions, ACT_RUN_SAVE)}>"Save Project (Ctrl+S)"</button>
+                    <button class="menu-item" onclick_shared={queue_action(&state.actions, ACT_RUN_SAVE)}>"Save"</button>
                     {inline_error("save-error", state.errors.save.as_deref())}
-                    <button class="menu-item" onclick_shared={queue_action(&state.actions, ACT_RUN_EXPORT)}>"Export Artifacts"</button>
+                    <button class="menu-item" onclick_shared={queue_action(&state.actions, ACT_RUN_EXPORT)}>"Export"</button>
                     {inline_error("export-error", state.errors.export.as_deref())}
                 </nav>
             </div>
             <div class="transport-controls">
-                <button id="sim-play-btn" class={play_class} onclick_shared={queue_action(&state.actions, ACT_RUN_PLAY_PAUSE)} title="Start/Stop simulation (Space)">
+                <button id="sim-play-btn" class={play_class} onclick_shared={queue_action(&state.actions, ACT_RUN_PLAY_PAUSE)}>
                     {if state.playing { icon_pause() } else { icon_play() }}
                     <span class="btn-label">{play_label}</span>
                 </button>
-                <button id="sim-step-btn" class="transport-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_STEP)} title="Advance single solver step">
+                <button id="sim-step-btn" class="transport-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_STEP)}>
                     {icon_step()}
                     <span class="btn-label">"Step"</span>
                 </button>
-                <button id="sim-reset-btn" class="transport-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_RESET)} title="Reset simulation state">
+                <button id="sim-reset-btn" class="transport-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_RESET)}>
                     {icon_reset()}
                     <span class="btn-label">"Reset"</span>
                 </button>
                 <div class="solver-picker">
-                    <button id="sim-backend-indicator" class={backend_class} onclick_shared={queue_action(&state.actions, ACT_RUN_SOLVER_MENU)} title="Choose active solver">{format!("{backend_label} ▾")}</button>
+                    <button id="sim-backend-indicator" class={backend_class} onclick_shared={queue_action(&state.actions, ACT_RUN_SOLVER_MENU)}>{format!("{backend_label} ▾")}</button>
                     {if state.solver_menu_open { ui! {
                         <div id="solver-dropdown" class="solver-dropdown">
-                            <button id="solver-wgsl-ipc" class="menu-item" onclick_shared={queue_action(&state.actions, ACT_RUN_SOLVER_GPU)}>"WGSL AVBD / IPC"</button>
-                            <button id="solver-barrier-al" class="menu-item" onclick_shared={queue_action(&state.actions, ACT_RUN_SOLVER_AL)}>"WGSL AVBD / barrier AL (experimental)"</button>
-                            <button id="solver-cpu" class="menu-item" onclick_shared={queue_action(&state.actions, ACT_RUN_SOLVER_CPU)}>"CPU VBD / OGC"</button>
+                            <button id="solver-wgsl-ipc" class="menu-item" onclick_shared={queue_action(&state.actions, ACT_RUN_SOLVER_GPU)}>{SOLVER_GPU_IPC}</button>
+                            <button id="solver-barrier-al" class="menu-item experimental" onclick_shared={queue_action(&state.actions, ACT_RUN_SOLVER_AL)}>{SOLVER_GPU_AL}</button>
+                            <button id="solver-cpu" class="menu-item" onclick_shared={queue_action(&state.actions, ACT_RUN_SOLVER_CPU)}>{SOLVER_CPU}</button>
                         </div>
                     }} else { ui! { <span /> } }}
                 </div>
@@ -4176,28 +4215,28 @@ fn build_runner_top_bar(state: &CssRunnerState) -> Node {
             </div>
             <div class="top-bar-right">
                 <div class="layout-switcher">
-                    <button class={split_class} onclick_shared={queue_action(&state.actions, ACT_RUN_VIEW_SPLIT)} title="Split 3D + 2D View">
+                    <button class={split_class} onclick_shared={queue_action(&state.actions, ACT_RUN_VIEW_SPLIT)}>
                         {icon_view_split()}
                         <span class="btn-label">"Split"</span>
                     </button>
-                    <button class={threed_class} onclick_shared={queue_action(&state.actions, ACT_RUN_VIEW_3D)} title="Full 3D Garment View">
+                    <button class={threed_class} onclick_shared={queue_action(&state.actions, ACT_RUN_VIEW_3D)}>
                         {icon_view_3d()}
                         <span class="btn-label">"3D"</span>
                     </button>
-                    <button class={twod_class} onclick_shared={queue_action(&state.actions, ACT_RUN_VIEW_2D)} title="Full 2D Pattern Board">
+                    <button class={twod_class} onclick_shared={queue_action(&state.actions, ACT_RUN_VIEW_2D)}>
                         {icon_view_2d()}
                         <span class="btn-label">"2D"</span>
                     </button>
                 </div>
-                <button id="clean-view-toggle" class={clean_class} onclick_shared={queue_action(&state.actions, ACT_RUN_CLEAN_VIEW)} title="Minimalist Presentation View">
+                <button id="clean-view-toggle" class={clean_class} onclick_shared={queue_action(&state.actions, ACT_RUN_CLEAN_VIEW)}>
                     {icon_clean_view()}
                     <span class="btn-label">"Clean View"</span>
                 </button>
-                <button id="command-palette-trigger" onclick_shared={queue_action(&state.actions, ACT_RUN_PALETTE_TOGGLE)} title="Open Command Palette (Ctrl+K)">
+                <button id="command-palette-trigger" onclick_shared={queue_action(&state.actions, ACT_RUN_PALETTE_TOGGLE)}>
                     {icon_palette()}
                     <span class="btn-label">"Commands"</span>
                 </button>
-                <button id="theme-toggle" onclick_shared={queue_action(&state.actions, ACT_RUN_THEME_TOGGLE)} title={theme_label}>
+                <button id="theme-toggle" onclick_shared={queue_action(&state.actions, ACT_RUN_THEME_TOGGLE)} title="Theme" aria-label="Theme">
                     {icon_day_night_switch(matches!(state.theme, Theme::Dark))}
                 </button>
             </div>
@@ -8965,7 +9004,7 @@ mod tests {
                 "#avatar-diagnostics-btn",
                 "Avatar & Dress Form Diagnostics (Shift+A)",
             ),
-            ("#sim-play-btn", "Start/Stop simulation (Space)"),
+            ("#theme-toggle", "Theme"),
         ] {
             let trimmed_id = btn_id.trim_start_matches('#');
             assert_eq!(find_dom_title(&ui_tree, trimmed_id), Some(expected_tooltip));
@@ -9006,6 +9045,52 @@ mod tests {
                 "tooltip for {btn_id} must fit cleanly on screen: {:?}",
                 tip_node.layout
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod top_bar_text_tests {
+    use super::*;
+
+    #[test]
+    fn top_bar_has_names_only_and_tooltips_only_on_icon_buttons() {
+        let _guard = worker::WORKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let avatar = dir.path().join("avatar.obj");
+        std::fs::write(&avatar, "v 0 0 -10\nv 1 0 -10\nv 0 1 -10\nf 1 2 3\n")
+            .expect("write avatar");
+        let project = FittingProject::basic(GarmentKind::Tshirt, 1, avatar);
+        let scene = project.compile().expect("compile scene");
+        let files = DocumentFiles {
+            output: dir.path().join("out"),
+            source: None,
+            modified: false,
+        };
+        let (tx, latest) = worker::start_cpu().expect("start cpu worker");
+        let mut state = CssRunnerState::new(project, scene, files, tx, latest);
+        state.solver_menu_open = true;
+        for (gpu, method) in [
+            (false, ContactMethod::Ipc),
+            (true, ContactMethod::Ipc),
+            (true, ContactMethod::BarrierAl),
+        ] {
+            state.gpu_sim = gpu;
+            state.contact_method = method;
+            let bar = build_runner_top_bar(&state);
+            assert_eq!(tooltip_policy_violations(&bar), Vec::<String>::new());
+            let text = format!("{bar:?}");
+            for gone in [
+                "Simulation Studio",
+                "(Ctrl+S)",
+                "Artifacts",
+                "(experimental)",
+                "CPU (OGC)",
+            ] {
+                assert!(!text.contains(gone), "top bar still shows {gone:?}");
+            }
         }
     }
 }
