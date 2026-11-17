@@ -126,9 +126,10 @@ impl FittingProject {
         }
     }
     pub fn load(path: &Path) -> Result<Self, String> {
-        let mut project: Self =
-            serde_json::from_str(&fs::read_to_string(path).map_err(|e| e.to_string())?)
-                .map_err(|e| e.to_string())?;
+        let data = fs::read_to_string(path)
+            .map_err(|e| format!("Cannot read fitting project {}: {e}", path.display()))?;
+        let mut project: Self = serde_json::from_str(&data)
+            .map_err(|e| format!("Cannot parse fitting project {}: {e}", path.display()))?;
         if project.avatar_path.is_relative() {
             project.avatar_path = path
                 .parent()

@@ -98,8 +98,10 @@ impl Project {
         Ok((mesh, State { x, v, time: 0. }))
     }
     pub fn load(path: &Path) -> Result<Self, String> {
-        let data = fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let project: Self = serde_json::from_str(&data).map_err(|e| e.to_string())?;
+        let data = fs::read_to_string(path)
+            .map_err(|e| format!("Cannot read project {}: {e}", path.display()))?;
+        let project: Self = serde_json::from_str(&data)
+            .map_err(|e| format!("Cannot parse project {}: {e}", path.display()))?;
         project.build()?;
         Ok(project)
     }

@@ -55,3 +55,36 @@ fn failed_save_preserves_previous_document() {
     atomic_write(&file, b"replacement").unwrap();
     assert_eq!(fs::read(file).unwrap(), b"replacement");
 }
+
+#[test]
+fn load_errors_name_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("missing.json");
+    let garbage = dir.path().join("garbage.json");
+    fs::write(&garbage, "not json").unwrap();
+    type Load = fn(&std::path::Path) -> Result<(), String>;
+    let loaders: [(&str, Load); 4] = [
+        ("template", |p| GarmentTemplate::load(p).map(drop)),
+        ("fitting project", |p| FittingProject::load(p).map(drop)),
+        ("project", |p| {
+            marvelous_cloth::project::Project::load(p).map(drop)
+        }),
+        ("avatar", |p| {
+            marvelous_cloth::avatar::SurfaceMesh::load_obj(p).map(drop)
+        }),
+    ];
+    for (kind, load) in loaders {
+        let err = load(&missing).unwrap_err();
+        assert!(
+            err.starts_with(&format!("Cannot read {kind} {}: ", missing.display())),
+            "{kind}: {err}"
+        );
+        if kind != "avatar" {
+            let err = load(&garbage).unwrap_err();
+            assert!(
+                err.starts_with(&format!("Cannot parse {kind} {}: ", garbage.display())),
+                "{kind}: {err}"
+            );
+        }
+    }
+}
