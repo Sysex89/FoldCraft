@@ -5758,106 +5758,151 @@ fn build_runner_status_bar(state: &CssRunnerState) -> Node {
     }
 }
 
+/// One palette command: action bit, icon, the same name its button uses, and
+/// the key that really triggers it (see `handle_runner_event`), if any.
+struct PaletteCommand {
+    action: u64,
+    icon: Node,
+    name: &'static str,
+    shortcut: Option<&'static str>,
+}
+
+fn runner_palette_commands(state: &CssRunnerState) -> Vec<PaletteCommand> {
+    let cmd = |action, icon, name, shortcut| PaletteCommand {
+        action,
+        icon,
+        name,
+        shortcut,
+    };
+    let (play_icon, play_name) = if state.playing {
+        (icon_pause(), "Pause")
+    } else {
+        (icon_play(), "Play")
+    };
+    let theme_icon = if matches!(state.theme, Theme::Dark) {
+        icon_sun()
+    } else {
+        icon_moon()
+    };
+    vec![
+        cmd(ACT_RUN_PLAY_PAUSE, play_icon, play_name, Some("Space")),
+        cmd(ACT_RUN_STEP, icon_step(), "Step", None),
+        cmd(ACT_RUN_RESET, icon_reset(), "Reset", None),
+        cmd(ACT_RUN_SAVE, icon_save(), "Save", Some("Ctrl+S")),
+        cmd(ACT_RUN_EXPORT, icon_export(), "Export", None),
+        cmd(ACT_RUN_CLEAN_VIEW, icon_clean_view(), "Clean View", None),
+        cmd(ACT_RUN_THEME_TOGGLE, theme_icon, "Theme", None),
+        cmd(ACT_RUN_VIEW_SPLIT, icon_view_split(), "Split", None),
+        cmd(ACT_RUN_VIEW_3D, icon_view_3d(), "3D", None),
+        cmd(ACT_RUN_VIEW_2D, icon_view_2d(), "2D", None),
+        cmd(ACT_RUN_CAM_RESET, icon_cam_reset(), "Reset Camera", None),
+        cmd(ACT_RUN_DRAWER_TOGGLE, icon_sidebar_toggle(), "Drawer", None),
+    ]
+}
+
+#[cfg(test)]
+mod palette_tests {
+    use super::*;
+
+    fn key(shortcut: &str) -> EngineEvent {
+        let (control, ch) = match shortcut.strip_prefix("Ctrl+") {
+            Some(rest) => (true, rest.to_lowercase()),
+            None if shortcut == "Space" => (false, " ".to_string()),
+            None => (false, shortcut.to_lowercase()),
+        };
+        EngineEvent::Key(cssimpler::renderer::KeyboardEvent {
+            logical_key: cssimpler::renderer::KeyIdentity::Character(ch),
+            physical_key: None,
+            location: cssimpler::renderer::KeyLocation::Standard,
+            state: cssimpler::renderer::ButtonState::Pressed,
+            repeat: false,
+            modifiers: cssimpler::renderer::KeyboardModifiers {
+                control,
+                ..Default::default()
+            },
+        })
+    }
+
+    #[test]
+    fn every_listed_shortcut_runs_its_command() {
+        let _guard = worker::WORKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let avatar = dir.path().join("avatar.obj");
+        std::fs::write(&avatar, "v 0 0 -10\nv 1 0 -10\nv 0 1 -10\nf 1 2 3\n")
+            .expect("write avatar");
+        let project = FittingProject::basic(GarmentKind::Tshirt, 1, avatar);
+        let scene = project.compile().expect("compile scene");
+        let files = DocumentFiles {
+            output: dir.path().join("out"),
+            source: None,
+            modified: false,
+        };
+        let (tx, latest) = worker::start_cpu().expect("start cpu worker");
+        let mut state = CssRunnerState::new(project, scene, files, tx, latest);
+
+        let listed: Vec<(u64, &str)> = runner_palette_commands(&state)
+            .into_iter()
+            .filter_map(|c| c.shortcut.map(|k| (c.action, k)))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![(ACT_RUN_PLAY_PAUSE, "Space"), (ACT_RUN_SAVE, "Ctrl+S")],
+            "only keys the handler binds may be listed"
+        );
+
+        let tool = state.active_2d_tool.clone();
+        let playing = state.playing;
+        assert!(handle_runner_event(&mut state, &key("Space")));
+        assert_eq!(state.playing, !playing);
+
+        let (target, _) = state.save_target();
+        assert!(!target.exists());
+        assert!(handle_runner_event(&mut state, &key("Ctrl+S")));
+        assert!(target.is_file(), "Ctrl+S saves");
+        assert_eq!(state.active_2d_tool, tool, "no shortcut switched a tool");
+
+        // Every command name matches the button that runs the same action.
+        let top_bar = format!("{:?}", build_runner_top_bar(&state));
+        for name in ["Step", "Reset"] {
+            assert!(top_bar.contains(&format!("\"{name}\"")), "{name}");
+        }
+    }
+}
+
 fn build_runner_command_palette(state: &CssRunnerState) -> Node {
     if !state.command_palette_open {
         return ui! { <div id="command-palette-container"></div> };
     }
 
+    let items: Vec<Node> = runner_palette_commands(state)
+        .into_iter()
+        .map(|c| {
+            let shortcut = match c.shortcut {
+                Some(key) => ui! { <span class="command-shortcut">{key}</span> },
+                None => ui! { <span class="hidden" /> },
+            };
+            ui! {
+                <button class="palette-item" onclick_shared={queue_action(&state.actions, c.action)}>
+                    <div class="item-left">
+                        {c.icon}
+                        <span>{c.name}</span>
+                    </div>
+                    {shortcut}
+                </button>
+            }
+        })
+        .collect();
+
     ui! {
         <div id="command-palette-container" class="command-palette-backdrop">
             <div class="command-palette-modal">
                 <div class="palette-header">
-                    <span class="palette-title">"Studio V2 Command Palette"</span>
-                    <button class="palette-close-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_PALETTE_TOGGLE)}>"✕"</button>
-                </div>
-                <div class="palette-input">
-                    "Type a command or shortcut..."
+                    <button id="palette-close-btn" class="palette-close-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_PALETTE_TOGGLE)} title="Close" aria-label="Close">"✕"</button>
                 </div>
                 <div class="palette-items">
-                    <button class="palette-item" onclick_shared={queue_action(&state.actions, ACT_RUN_PLAY_PAUSE)}>
-                        <div class="item-left">
-                            {if state.playing { icon_pause() } else { icon_play() }}
-                            <span>"Toggle Simulation"</span>
-                        </div>
-                        <span class="command-shortcut">"Space"</span>
-                    </button>
-                    <button class="palette-item" onclick_shared={queue_action(&state.actions, ACT_RUN_STEP)}>
-                        <div class="item-left">
-                            {icon_step()}
-                            <span>"Step Simulation"</span>
-                        </div>
-                        <span class="command-shortcut">"S"</span>
-                    </button>
-                    <button class="palette-item" onclick_shared={queue_action(&state.actions, ACT_RUN_RESET)}>
-                        <div class="item-left">
-                            {icon_reset()}
-                            <span>"Reset Simulation"</span>
-                        </div>
-                        <span class="command-shortcut">"R"</span>
-                    </button>
-                    <button class="palette-item" onclick_shared={queue_action(&state.actions, ACT_RUN_SAVE)}>
-                        <div class="item-left">
-                            {icon_save()}
-                            <span>"Save Fitting Project"</span>
-                        </div>
-                        <span class="command-shortcut">"Ctrl+S"</span>
-                    </button>
-                    <button class="palette-item" onclick_shared={queue_action(&state.actions, ACT_RUN_EXPORT)}>
-                        <div class="item-left">
-                            {icon_export()}
-                            <span>"Export Artifacts (OBJ & True-Scale SVG)"</span>
-                        </div>
-                        <span class="command-shortcut">"Ctrl+E"</span>
-                    </button>
-                    <button class="palette-item" onclick_shared={queue_action(&state.actions, ACT_RUN_CLEAN_VIEW)}>
-                        <div class="item-left">
-                            {icon_clean_view()}
-                            <span>"Toggle Clean View"</span>
-                        </div>
-                        <span class="command-shortcut">"F11"</span>
-                    </button>
-                    <button class="palette-item" onclick_shared={queue_action(&state.actions, ACT_RUN_THEME_TOGGLE)}>
-                        <div class="item-left">
-                            {if matches!(state.theme, Theme::Dark) { icon_sun() } else { icon_moon() }}
-                            <span>"Toggle Dark / Light Theme"</span>
-                        </div>
-                        <span class="command-shortcut">"T"</span>
-                    </button>
-                    <button class="palette-item" onclick_shared={queue_action(&state.actions, ACT_RUN_VIEW_SPLIT)}>
-                        <div class="item-left">
-                            {icon_view_split()}
-                            <span>"Split 2D / 3D Layout"</span>
-                        </div>
-                        <span class="command-shortcut">"1"</span>
-                    </button>
-                    <button class="palette-item" onclick_shared={queue_action(&state.actions, ACT_RUN_VIEW_3D)}>
-                        <div class="item-left">
-                            {icon_view_3d()}
-                            <span>"3D Only Viewport"</span>
-                        </div>
-                        <span class="command-shortcut">"2"</span>
-                    </button>
-                    <button class="palette-item" onclick_shared={queue_action(&state.actions, ACT_RUN_VIEW_2D)}>
-                        <div class="item-left">
-                            {icon_view_2d()}
-                            <span>"2D Only Pattern Board"</span>
-                        </div>
-                        <span class="command-shortcut">"3"</span>
-                    </button>
-                    <button class="palette-item" onclick_shared={queue_action(&state.actions, ACT_RUN_CAM_RESET)}>
-                        <div class="item-left">
-                            {icon_cam_reset()}
-                            <span>"Reset 3D Camera"</span>
-                        </div>
-                        <span class="command-shortcut">"Home"</span>
-                    </button>
-                    <button class="palette-item" onclick_shared={queue_action(&state.actions, ACT_RUN_DRAWER_TOGGLE)}>
-                        <div class="item-left">
-                            {icon_sidebar_toggle()}
-                            <span>"Toggle Left Asset Drawer"</span>
-                        </div>
-                        <span class="command-shortcut">"Ctrl+B"</span>
-                    </button>
+                    {items}
                 </div>
             </div>
         </div>
