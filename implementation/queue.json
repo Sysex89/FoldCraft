@@ -872,6 +872,19 @@
       "owner": null,
       "vruntime": 3.342039609635428,
       "pr": "https://github.com/NicTanghe/FoldCraft/pull/58"
+    },
+    {
+      "id": "FC-0065",
+      "title": "Fall back to XWayland for the native window on Linux Wayland sessions",
+      "acceptance": "On Linux, when cloth-fit --view/--ui-smoke/--ui-perf-smoke or the marvelous-cloth window starts in a Wayland session with an X11 DISPLAY available, WAYLAND_DISPLAY/WAYLAND_SOCKET are removed before any thread starts so winit uses XWayland and the cssimpler GPU viewport opens instead of failing with 'Linux GPU viewports currently require X11'; a notice says so; FOLDCRAFT_KEEP_WAYLAND=1 opts out; without DISPLAY nothing changes; headless runs are unaffected; CPU tests cover the decision; README and install docs describe the behavior and the manual equivalent.",
+      "points": 1.0,
+      "spent": 0,
+      "priority": "high",
+      "depends_on": [],
+      "status": "review",
+      "owner": null,
+      "vruntime": 3.3420396096354286,
+      "pr": "https://github.com/NicTanghe/FoldCraft/pull/59"
     }
   ]
 }
