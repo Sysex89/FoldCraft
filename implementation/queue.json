@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "clock": 3.342039609635428,
+  "clock": 3.3420396096354286,
   "tickets": [
     {
       "id": "FC-0001",
@@ -816,10 +816,10 @@
       "spent": 0,
       "priority": "high",
       "depends_on": [],
-      "status": "ready",
+      "status": "review",
       "owner": null,
       "vruntime": 3.3420396096354286,
-      "pr": null
+      "pr": "https://github.com/NicTanghe/FoldCraft/pull/54"
     },
     {
       "id": "FC-0061",
@@ -829,10 +829,10 @@
       "spent": 0,
       "priority": "high",
       "depends_on": [],
-      "status": "ready",
+      "status": "review",
       "owner": null,
       "vruntime": 3.3420396096354286,
-      "pr": null
+      "pr": "https://github.com/NicTanghe/FoldCraft/pull/55"
     },
     {
       "id": "FC-0062",
@@ -842,23 +842,23 @@
       "spent": 0,
       "priority": "normal",
       "depends_on": [],
-      "status": "ready",
+      "status": "review",
       "owner": null,
       "vruntime": 3.3420396096354286,
-      "pr": null
+      "pr": "https://github.com/NicTanghe/FoldCraft/pull/56"
     },
     {
       "id": "FC-0063",
-      "title": "Save the native workspace to the opened project through the document writer",
-      "acceptance": "Save Project (Ctrl+S) in cloth-fit --view writes to the --project path when one was given (otherwise a clearly reported default path) using document.rs atomic replacement and portable avatar assets, not a plain write to <output>/fitting-project.json; reopening the saved file restores the template, state and settings; a failed write leaves the previous file intact and reports the error; CPU tests cover save/reopen, the no-source default and an injected write failure.",
+      "title": "Save the native workspace to the opened project file",
+      "acceptance": "Save Project (Ctrl+S) in cloth-fit --view writes to the --project path when one was given, and otherwise to a clearly reported default (<output>/fitting-project.json), instead of always writing the output directory; it keeps using FittingProject::save (document.rs atomic replacement and portable avatar assets); reopening the saved file restores the template, state and settings; a failed save leaves the previous file intact and reports the error; CPU tests cover save/reopen to the source, the no-source default and a rejected save.",
       "points": 2.0,
       "spent": 0,
       "priority": "high",
       "depends_on": [],
-      "status": "ready",
+      "status": "review",
       "owner": null,
       "vruntime": 3.3420396096354286,
-      "pr": null
+      "pr": "https://github.com/NicTanghe/FoldCraft/pull/57"
     },
     {
       "id": "FC-0064",
@@ -868,10 +868,10 @@
       "spent": 0,
       "priority": "normal",
       "depends_on": [],
-      "status": "ready",
+      "status": "review",
       "owner": null,
       "vruntime": 3.342039609635428,
-      "pr": null
+      "pr": "https://github.com/NicTanghe/FoldCraft/pull/58"
     }
   ]
 }
