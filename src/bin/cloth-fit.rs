@@ -8,13 +8,10 @@ use marvelous_cloth::{
 };
 use std::{fs, io::Write, path::PathBuf, time::Instant};
 #[cfg(feature = "desktop")]
-#[path = "../atelier.rs"]
-mod fitting_editor;
-#[cfg(feature = "desktop")]
 #[path = "../gpu_bench.rs"]
 mod gpu_bench;
 #[cfg(feature = "desktop")]
-use marvelous_cloth::render;
+use marvelous_cloth::{atelier as fitting_editor, render};
 
 #[derive(Parser)]
 #[command(about = "Fit simple test garments on a static OBJ mannequin")]
