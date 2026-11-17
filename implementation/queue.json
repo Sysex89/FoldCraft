@@ -894,10 +894,10 @@
       "spent": 0,
       "priority": "high",
       "depends_on": [],
-      "status": "active",
-      "owner": "claude-panel-delete",
+      "status": "review",
+      "owner": null,
       "vruntime": 3.3420396096354286,
-      "pr": null
+      "pr": "https://github.com/NicTanghe/FoldCraft/pull/62"
     }
   ]
 }
