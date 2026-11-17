@@ -1221,11 +1221,12 @@ pub fn viewport_3d_rect(state: &CssRunnerState) -> Rect2d {
         ViewLayoutMode::Split => stage_w * 0.5,
     };
 
+    // The 3D viewport has no header: the canvas fills the stage height.
     Rect2d {
         x: left_w,
-        y: body_y + 32.0,
+        y: body_y,
         w: vp3d_w,
-        h: (body_h - 32.0).max(1.0),
+        h: body_h,
     }
 }
 
@@ -4107,6 +4108,51 @@ fn inline_error(id: &'static str, message: Option<&str>) -> Node {
     }
 }
 
+/// Solver names, identical in the picker and on its badge. The experimental
+/// barrier-AL backend is marked by the `experimental` class, not by words.
+const SOLVER_GPU_IPC: &str = "WGSL AVBD / IPC";
+const SOLVER_GPU_AL: &str = "WGSL AVBD / barrier AL";
+const SOLVER_CPU: &str = "CPU VBD / OGC";
+
+/// Tooltip rule for every button under `root`: a button with visible text has
+/// no `title`; an icon-only button has a `title` equal to its `aria-label`.
+/// Returns one description per violation.
+#[cfg(test)]
+pub(crate) fn tooltip_policy_violations(root: &Node) -> Vec<String> {
+    fn text(node: &Node) -> String {
+        match node {
+            Node::Text(t) => t.trim().to_string(),
+            Node::Element(el) => el.children.iter().map(text).collect(),
+        }
+    }
+    fn walk(node: &Node, out: &mut Vec<String>) {
+        let Node::Element(el) = node else {
+            return;
+        };
+        if el.tag == "button" {
+            let label = text(node);
+            let title = el.attribute("title");
+            let name = el.attribute("aria-label");
+            let id = el.id.clone().unwrap_or_default();
+            if !label.is_empty() && !label.chars().all(|c| !c.is_alphanumeric()) {
+                if let Some(title) = title {
+                    out.push(format!("#{id} '{label}' has tooltip '{title}'"));
+                }
+            } else if title.is_none() || title != name {
+                out.push(format!(
+                    "#{id} icon-only: title {title:?} must equal aria-label {name:?}"
+                ));
+            }
+        }
+        for child in &el.children {
+            walk(child, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, &mut out);
+    out
+}
+
 fn build_runner_top_bar(state: &CssRunnerState) -> Node {
     let play_label = if state.playing { "Pause" } else { "Play" };
     let play_class = if state.playing {
@@ -4127,48 +4173,42 @@ fn build_runner_top_bar(state: &CssRunnerState) -> Node {
         "clean-view-toggle"
     };
 
-    let (backend_class, backend_label) = if state.gpu_sim {
-        ("backend-badge gpu", state.contact_method.label())
-    } else {
-        ("backend-badge cpu", "CPU (OGC)")
-    };
-
-    let theme_label = match state.theme {
-        Theme::Dark => "Theme: Dark",
-        Theme::Light => "Theme: Light",
+    let (backend_class, backend_label) = match (state.gpu_sim, state.contact_method) {
+        (true, ContactMethod::Ipc) => ("backend-badge gpu", SOLVER_GPU_IPC),
+        (true, ContactMethod::BarrierAl) => ("backend-badge gpu experimental", SOLVER_GPU_AL),
+        (false, _) => ("backend-badge cpu", SOLVER_CPU),
     };
 
     ui! {
         <header id="top-bar" class="top-bar">
             <div class="top-bar-left">
-                <span class="app-title">"FoldCraft | Simulation Studio V2"</span>
                 <nav class="top-bar-menus">
-                    <button class="menu-item" onclick_shared={queue_action(&state.actions, ACT_RUN_SAVE)}>"Save Project (Ctrl+S)"</button>
+                    <button class="menu-item" onclick_shared={queue_action(&state.actions, ACT_RUN_SAVE)}>"Save"</button>
                     {inline_error("save-error", state.errors.save.as_deref())}
-                    <button class="menu-item" onclick_shared={queue_action(&state.actions, ACT_RUN_EXPORT)}>"Export Artifacts"</button>
+                    <button class="menu-item" onclick_shared={queue_action(&state.actions, ACT_RUN_EXPORT)}>"Export"</button>
                     {inline_error("export-error", state.errors.export.as_deref())}
                 </nav>
             </div>
             <div class="transport-controls">
-                <button id="sim-play-btn" class={play_class} onclick_shared={queue_action(&state.actions, ACT_RUN_PLAY_PAUSE)} title="Start/Stop simulation (Space)">
+                <button id="sim-play-btn" class={play_class} onclick_shared={queue_action(&state.actions, ACT_RUN_PLAY_PAUSE)}>
                     {if state.playing { icon_pause() } else { icon_play() }}
                     <span class="btn-label">{play_label}</span>
                 </button>
-                <button id="sim-step-btn" class="transport-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_STEP)} title="Advance single solver step">
+                <button id="sim-step-btn" class="transport-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_STEP)}>
                     {icon_step()}
                     <span class="btn-label">"Step"</span>
                 </button>
-                <button id="sim-reset-btn" class="transport-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_RESET)} title="Reset simulation state">
+                <button id="sim-reset-btn" class="transport-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_RESET)}>
                     {icon_reset()}
                     <span class="btn-label">"Reset"</span>
                 </button>
                 <div class="solver-picker">
-                    <button id="sim-backend-indicator" class={backend_class} onclick_shared={queue_action(&state.actions, ACT_RUN_SOLVER_MENU)} title="Choose active solver">{format!("{backend_label} ▾")}</button>
+                    <button id="sim-backend-indicator" class={backend_class} onclick_shared={queue_action(&state.actions, ACT_RUN_SOLVER_MENU)}>{format!("{backend_label} ▾")}</button>
                     {if state.solver_menu_open { ui! {
                         <div id="solver-dropdown" class="solver-dropdown">
-                            <button id="solver-wgsl-ipc" class="menu-item" onclick_shared={queue_action(&state.actions, ACT_RUN_SOLVER_GPU)}>"WGSL AVBD / IPC"</button>
-                            <button id="solver-barrier-al" class="menu-item" onclick_shared={queue_action(&state.actions, ACT_RUN_SOLVER_AL)}>"WGSL AVBD / barrier AL (experimental)"</button>
-                            <button id="solver-cpu" class="menu-item" onclick_shared={queue_action(&state.actions, ACT_RUN_SOLVER_CPU)}>"CPU VBD / OGC"</button>
+                            <button id="solver-wgsl-ipc" class="menu-item" onclick_shared={queue_action(&state.actions, ACT_RUN_SOLVER_GPU)}>{SOLVER_GPU_IPC}</button>
+                            <button id="solver-barrier-al" class="menu-item experimental" onclick_shared={queue_action(&state.actions, ACT_RUN_SOLVER_AL)}>{SOLVER_GPU_AL}</button>
+                            <button id="solver-cpu" class="menu-item" onclick_shared={queue_action(&state.actions, ACT_RUN_SOLVER_CPU)}>{SOLVER_CPU}</button>
                         </div>
                     }} else { ui! { <span /> } }}
                 </div>
@@ -4176,28 +4216,28 @@ fn build_runner_top_bar(state: &CssRunnerState) -> Node {
             </div>
             <div class="top-bar-right">
                 <div class="layout-switcher">
-                    <button class={split_class} onclick_shared={queue_action(&state.actions, ACT_RUN_VIEW_SPLIT)} title="Split 3D + 2D View">
+                    <button class={split_class} onclick_shared={queue_action(&state.actions, ACT_RUN_VIEW_SPLIT)}>
                         {icon_view_split()}
                         <span class="btn-label">"Split"</span>
                     </button>
-                    <button class={threed_class} onclick_shared={queue_action(&state.actions, ACT_RUN_VIEW_3D)} title="Full 3D Garment View">
+                    <button class={threed_class} onclick_shared={queue_action(&state.actions, ACT_RUN_VIEW_3D)}>
                         {icon_view_3d()}
                         <span class="btn-label">"3D"</span>
                     </button>
-                    <button class={twod_class} onclick_shared={queue_action(&state.actions, ACT_RUN_VIEW_2D)} title="Full 2D Pattern Board">
+                    <button class={twod_class} onclick_shared={queue_action(&state.actions, ACT_RUN_VIEW_2D)}>
                         {icon_view_2d()}
                         <span class="btn-label">"2D"</span>
                     </button>
                 </div>
-                <button id="clean-view-toggle" class={clean_class} onclick_shared={queue_action(&state.actions, ACT_RUN_CLEAN_VIEW)} title="Minimalist Presentation View">
+                <button id="clean-view-toggle" class={clean_class} onclick_shared={queue_action(&state.actions, ACT_RUN_CLEAN_VIEW)}>
                     {icon_clean_view()}
                     <span class="btn-label">"Clean View"</span>
                 </button>
-                <button id="command-palette-trigger" onclick_shared={queue_action(&state.actions, ACT_RUN_PALETTE_TOGGLE)} title="Open Command Palette (Ctrl+K)">
+                <button id="command-palette-trigger" onclick_shared={queue_action(&state.actions, ACT_RUN_PALETTE_TOGGLE)}>
                     {icon_palette()}
                     <span class="btn-label">"Commands"</span>
                 </button>
-                <button id="theme-toggle" onclick_shared={queue_action(&state.actions, ACT_RUN_THEME_TOGGLE)} title={theme_label}>
+                <button id="theme-toggle" onclick_shared={queue_action(&state.actions, ACT_RUN_THEME_TOGGLE)} title="Theme" aria-label="Theme">
                     {icon_day_night_switch(matches!(state.theme, Theme::Dark))}
                 </button>
             </div>
@@ -4239,35 +4279,35 @@ fn build_runner_3d_rail(state: &CssRunnerState) -> Node {
 
     ui! {
         <aside id="rail-3d" class="tool-rail tool-rail-3d">
-            <button class={gizmo_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_GIZMO)} title="Select & Arrange [Gizmo] (1)">
+            <button class={gizmo_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_GIZMO)}>
                 {icon_gizmo()}
                 <span class="tool-label">"Gizmo"</span>
             </button>
-            <button class={grab_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_GRAB)} title="Grab Cloth (Pull & Drag in Simulation) (W)">
+            <button class={grab_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_GRAB)}>
                 {icon_grab()}
                 <span class="tool-label">"Grab"</span>
             </button>
-            <button class={sew3d_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_SEW3D)} title="3D Segment Sewing (N)">
+            <button class={sew3d_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_SEW3D)}>
                 {icon_sew_3d()}
                 <span class="tool-label">"3D Sew"</span>
             </button>
-            <button class={pin_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_PIN)} title="Pin Cloth [Click vertices] (P)">
+            <button class={pin_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_PIN)}>
                 {icon_pin()}
                 <span class="tool-label">"Pin"</span>
             </button>
-            <button class={msr_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_MEASURE3D)} title="3D Tape Measure (T)">
+            <button class={msr_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_MEASURE3D)}>
                 {icon_measure_3d()}
                 <span class="tool-label">"Measure"</span>
             </button>
-            <button id="avatar-diagnostics-btn" class={avatar_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_AVATAR_DIAG)} title="Avatar & Dress Form Diagnostics (Shift+A)">
+            <button id="avatar-diagnostics-btn" class={avatar_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_AVATAR_DIAG)}>
                 {icon_dress_form()}
                 <span class="tool-label">"Avatar"</span>
             </button>
-            <button class="tool-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_CAM_RESET)} title="Reset Camera View [Framing] (0)">
+            <button class="tool-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_CAM_RESET)}>
                 {icon_cam_reset()}
-                <span class="tool-label">"Reset"</span>
+                <span class="tool-label">"Reset Camera"</span>
             </button>
-            <button class="tool-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_DRAWER_TOGGLE)} title="Toggle Asset & Piece Drawer (Tab)">
+            <button class="tool-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_DRAWER_TOGGLE)}>
                 {icon_sidebar_toggle()}
                 <span class="tool-label">"Drawer"</span>
             </button>
@@ -4338,47 +4378,47 @@ fn build_runner_2d_rail(state: &CssRunnerState) -> Node {
 
     ui! {
         <aside id="rail-2d" class="tool-rail tool-rail-2d">
-            <button class={edit_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_EDIT2D)} title="Edit Point / Transform (Z / A)">
+            <button class={edit_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_EDIT2D)}>
                 {icon_edit_2d()}
                 <span class="tool-label">"Edit"</span>
             </button>
-            <button class={rect_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_RECT2D)} title="Draw Rectangle Pattern (S)">
+            <button class={rect_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_RECT2D)}>
                 {icon_rect_2d()}
                 <span class="tool-label">"Rect"</span>
             </button>
-            <button class={pen_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_PEN2D)} title="Draw Polygon Pattern (H)">
+            <button class={pen_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_PEN2D)}>
                 {icon_polygon_2d()}
                 <span class="tool-label">"Pen"</span>
             </button>
-            <button class={free_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_FREE2D)} title="Freehand Pattern Curve (F)">
+            <button class={free_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_FREE2D)}>
                 {icon_freehand_2d()}
                 <span class="tool-label">"Free"</span>
             </button>
-            <button class={sew_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_SEW2D)} title="Sew Seams (B)">
+            <button class={sew_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_SEW2D)}>
                 {icon_sew_2d()}
                 <span class="tool-label">"Sew"</span>
             </button>
-            <button class={split_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_SPLIT2D)} title="Split / Add Point (X)">
+            <button class={split_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_SPLIT2D)}>
                 {icon_split_2d()}
                 <span class="tool-label">"Split"</span>
             </button>
-            <button class={line_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_INTERNAL2D)} title="Internal Polygon / Line (G)">
+            <button class={line_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_INTERNAL2D)}>
                 {icon_internal_2d()}
                 <span class="tool-label">"Line"</span>
             </button>
-            <button class={tape_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_MEASURE2D)} title="2D Tape Measure (M)">
+            <button class={tape_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_MEASURE2D)}>
                 {icon_measure_2d()}
                 <span class="tool-label">"Tape"</span>
             </button>
-            <button class={trim_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_TRIM2D)} title="Trim (T)">
+            <button class={trim_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_TRIM2D)}>
                 {icon_trim_2d()}
                 <span class="tool-label">"Trim"</span>
             </button>
-            <button id="tool-corner-select-2d" class={corner_select_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_CORNER_SELECT2D)} title="Select Corners (V / Shift+Click multi)">
+            <button id="tool-corner-select-2d" class={corner_select_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_CORNER_SELECT2D)}>
                 {icon_corner_select_2d()}
                 <span class="tool-label">"Select Corner"</span>
             </button>
-            <button id="tool-corner-round-2d" class={corner_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_CORNER2D)} title="Corner Rounding Menu & Fillet (C)">
+            <button id="tool-corner-round-2d" class={corner_class} onclick_shared={queue_action(&state.actions, ACT_RUN_TOOL_CORNER2D)}>
                 {icon_corner_2d()}
                 <span class="tool-label">"Corner"</span>
             </button>
@@ -4614,10 +4654,6 @@ fn build_runner_stage(state: &CssRunnerState) -> Node {
 fn build_runner_3d_viewport(_state: &CssRunnerState) -> Node {
     ui! {
         <div id="viewport-3d" class="viewport-container">
-            <div class="viewport-header">
-                <span class="viewport-title">"3D Garment & Avatar"</span>
-                <span class="viewport-sub">"USD native 3D viewport (VBD + OGC)"</span>
-            </div>
             <div class="canvas-area">
                 <div id="runner-viewport-3d-scene" class="viewport"></div>
             </div>
@@ -4630,51 +4666,9 @@ pub fn build_runner_2d_viewport(state: &CssRunnerState) -> Node {
     let (_canvas_rect, svg_rect) = compute_2d_viewport_rects(state);
     let svg_w = format!("{:.1}px", svg_rect.w);
     let svg_h = format!("{:.1}px", svg_rect.h);
-    let connected = compute_connected_2d_highlight(state);
-
-    let panels = &state.project.template.panels;
-    let selected_panel = panels.get(state.selected_piece_index);
-    let selected_name = selected_panel.map_or("None", |p| p.name.as_str());
-    let (w_mm, h_mm) = selected_panel.map_or((0.0, 0.0), |p| {
-        let e = panel_extent(p);
-        (e.width_m * 1000.0, e.height_m * 1000.0)
-    });
 
     let zoom_pct = (state.board_2d_zoom * 100.0).round() as i32;
-    let linked_str = if connected.connected_panels.is_empty() {
-        String::new()
-    } else {
-        let ids: Vec<&str> = connected
-            .connected_panels
-            .iter()
-            .map(|s| s.as_str())
-            .collect();
-        format!(" +{}", ids.join(","))
-    };
-    let sel_pts = effective_selected_points(state);
-    let has_selected_pts = !sel_pts.is_empty();
-    let sub_detail = if sel_pts.len() > 1 {
-        format!(" · {} corners selected{linked_str}", sel_pts.len())
-    } else if let Some((pid, pt_idx)) = sel_pts.into_iter().next() {
-        let edge_label = state
-            .project
-            .template
-            .panels
-            .iter()
-            .find(|p| p.id == pid)
-            .and_then(|p| p.polygon.as_ref())
-            .and_then(|poly| poly.edges.get(pt_idx))
-            .map_or("?", |e| e.as_str());
-        format!(" · Corner #{pt_idx} ({edge_label}){linked_str}")
-    } else if let Some((ref _pid, ref ename)) = state.selected_2d_edge {
-        format!(" · Edge {ename}{linked_str}")
-    } else {
-        String::new()
-    };
-    let sub_text = format!(
-        "Tool: {} · Zoom: {}% · Selected: {} ({:.0}×{:.0} mm){}",
-        state.active_2d_tool, zoom_pct, selected_name, w_mm, h_mm, sub_detail
-    );
+    let has_selected_pts = !effective_selected_points(state).is_empty();
     let corner_menu_active =
         state.active_2d_tool == "Corner" || (state.corner_preview_active && has_selected_pts);
     let corner_group_class = if corner_menu_active {
@@ -4728,52 +4722,52 @@ pub fn build_runner_2d_viewport(state: &CssRunnerState) -> Node {
     let curve_class = pill("cad-2d-pill", has_round_target);
 
     let undo_btn = ui! {
-        <button id="cad-undo-btn" class={undo_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::Undo2d)} title="Undo (Ctrl+Z)">"Undo"</button>
+        <button id="cad-undo-btn" class={undo_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::Undo2d)}>"Undo"</button>
     };
     let redo_btn = ui! {
-        <button id="cad-redo-btn" class={redo_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::Redo2d)} title="Redo (Ctrl+Shift+Z)">"Redo"</button>
+        <button id="cad-redo-btn" class={redo_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::Redo2d)}>"Redo"</button>
     };
     let mode_radius_btn = ui! {
-        <button id="cad-corner-radius-mode" class={radius_mode_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::SetCornerMode(true))} title="Circular fillet mode">"Radius"</button>
+        <button id="cad-corner-radius-mode" class={radius_mode_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::SetCornerMode(true))}>"Radius"</button>
     };
     let mode_shape_btn = ui! {
-        <button id="cad-corner-shape-mode" class={shape_mode_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::SetCornerMode(false))} title="Shaped tension fillet mode">"Shape"</button>
+        <button id="cad-corner-shape-mode" class={shape_mode_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::SetCornerMode(false))}>"Shape"</button>
     };
     let radius_dec_btn = ui! {
-        <button id="cad-radius-dec" class="cad-2d-pill" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::AdjustCornerRadiusMm(-2.0))} title="Decrease corner radius">"-2"</button>
+        <button id="cad-radius-dec" class="cad-2d-pill" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::AdjustCornerRadiusMm(-2.0))} title="Decrease radius" aria-label="Decrease radius">"−"</button>
     };
     let radius_val = ui! {
         <span id="cad-radius-readout" class="cad-2d-value">{format!("{:.1} mm", state.corner_radius_mm)}</span>
     };
     let radius_inc_btn = ui! {
-        <button id="cad-radius-inc" class="cad-2d-pill" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::AdjustCornerRadiusMm(2.0))} title="Increase corner radius">"+2"</button>
+        <button id="cad-radius-inc" class="cad-2d-pill" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::AdjustCornerRadiusMm(2.0))} title="Increase radius" aria-label="Increase radius">"+"</button>
     };
     let tension_dec_btn = ui! {
-        <button id="cad-tension-dec" class="cad-2d-pill" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::AdjustCornerTension(-0.05))} title="Decrease tension">"T-"</button>
+        <button id="cad-tension-dec" class="cad-2d-pill" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::AdjustCornerTension(-0.05))} title="Decrease tension" aria-label="Decrease tension">"−"</button>
     };
     let tension_val = ui! {
-        <span id="cad-tension-readout" class="cad-2d-value">{format!("{:.2}", state.corner_tension)}</span>
+        <span id="cad-tension-readout" class="cad-2d-value">{format!("T {:.2}", state.corner_tension)}</span>
     };
     let tension_inc_btn = ui! {
-        <button id="cad-tension-inc" class="cad-2d-pill" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::AdjustCornerTension(0.05))} title="Increase tension">"T+"</button>
+        <button id="cad-tension-inc" class="cad-2d-pill" onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::AdjustCornerTension(0.05))} title="Increase tension" aria-label="Increase tension">"+"</button>
     };
     let apply_round_btn = ui! {
-        <button id="cad-apply-round-btn" class={round_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::ApplyCornerRoundSelected)} title="Round selected corner (Enter)">"Round"</button>
+        <button id="cad-apply-round-btn" class={round_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::ApplyCornerRoundSelected)}>"Round"</button>
     };
     let rule_sharp_btn = ui! {
-        <button id="cad-rule-sharp" class={sharp_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::SetCornerRule(CornerRule::Sharp))} title="Sharp independent handles">"Sharp"</button>
+        <button id="cad-rule-sharp" class={sharp_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::SetCornerRule(CornerRule::Sharp))}>"Sharp"</button>
     };
     let rule_smooth_btn = ui! {
-        <button id="cad-rule-smooth" class={smooth_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::SetCornerRule(CornerRule::Smooth))} title="Smooth G1 collinear handles">"Smooth"</button>
+        <button id="cad-rule-smooth" class={smooth_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::SetCornerRule(CornerRule::Smooth))}>"Smooth"</button>
     };
     let rule_sym_btn = ui! {
-        <button id="cad-rule-sym" class={sym_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::SetCornerRule(CornerRule::Symmetric))} title="Symmetric equal-length handles">"Sym"</button>
+        <button id="cad-rule-sym" class={sym_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::SetCornerRule(CornerRule::Symmetric))}>"Sym"</button>
     };
     let curve_on_btn = ui! {
-        <button id="cad-curve-on-btn" class={curve_class.clone()} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::ToggleSelectedCurve(true))} title="Convert selected boundary/corner to cubic Bézier">"Curve"</button>
+        <button id="cad-curve-on-btn" class={curve_class.clone()} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::ToggleSelectedCurve(true))}>"Curve"</button>
     };
     let curve_off_btn = ui! {
-        <button id="cad-curve-off-btn" class={curve_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::ToggleSelectedCurve(false))} title="Straighten selected boundary/corner">"Straight"</button>
+        <button id="cad-curve-off-btn" class={curve_class} onclick_shared={queue_ui_op(&state.pending_ui_ops, RunnerUiOp::ToggleSelectedCurve(false))}>"Straight"</button>
     };
 
     let (_vp2d_x, vp2d_w) = viewport_2d_span_x(state);
@@ -4893,18 +4887,17 @@ pub fn build_runner_2d_viewport(state: &CssRunnerState) -> Node {
         <div id="viewport-2d" class="viewport-container">
             <div class="viewport-header">
                 <div class="viewport-header-left">
-                    <span class="viewport-title">"2D Pattern Board"</span>
-                    <span class="viewport-sub">{sub_text}</span>
+                    <span id="board-zoom" class="viewport-sub">{format!("{zoom_pct}%")}</span>
                 </div>
                 <div class="viewport-tools">
                     {match measure_readout_mm(state) {
                         Some(mm) => ui! { <span id="measure-readout" class="cad-2d-value">{format!("{mm:.1} mm")}</span> },
                         None => ui! { <span class="hidden" /> },
                     }}
-                    <button class="viewport-tool-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_2D_ZOOM_IN)} title="Zoom In (+)">"+"</button>
-                    <button class="viewport-tool-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_2D_ZOOM_OUT)} title="Zoom Out (-)">"-"</button>
-                    <button class="viewport-tool-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_2D_FIT)} title="Fit Board (0)">"Fit"</button>
-                    <button class="viewport-tool-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_2D_NEXT_PIECE)} title="Cycle Piece (])">"Next Piece ▾"</button>
+                    <button class="viewport-tool-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_2D_ZOOM_IN)} title="Zoom in" aria-label="Zoom in">"+"</button>
+                    <button class="viewport-tool-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_2D_ZOOM_OUT)} title="Zoom out" aria-label="Zoom out">"−"</button>
+                    <button class="viewport-tool-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_2D_FIT)}>"Fit"</button>
+                    <button class="viewport-tool-btn" onclick_shared={queue_action(&state.actions, ACT_RUN_2D_NEXT_PIECE)}>"Next Piece"</button>
                 </div>
             </div>
             {cad_bar}
@@ -7086,6 +7079,15 @@ mod tests {
             usd_bounds.width > 100.0 && usd_bounds.height > 100.0,
             "USD viewport must have drawable area: {usd_bounds:?}"
         );
+        // Pointer routing uses viewport_3d_rect; it must match the laid-out host.
+        let routed = viewport_3d_rect(app.state());
+        assert!(
+            (routed.y - usd_bounds.y).abs() <= 1.5
+                && (routed.h - usd_bounds.height).abs() <= 1.5
+                && (routed.x - usd_bounds.x).abs() <= 1.5
+                && (routed.w - usd_bounds.width).abs() <= 1.5,
+            "routed 3D rect {routed:?} differs from USD host {usd_bounds:?}"
+        );
         assert!(app.find_element_bounds_by_id("#viewport-2d").is_some());
         assert!(app.find_element_bounds_by_id("#right-dock").is_some());
 
@@ -9000,18 +9002,8 @@ mod tests {
             None
         }
 
-        for (btn_id, expected_tooltip) in [
-            (
-                "#tool-corner-select-2d",
-                "Select Corners (V / Shift+Click multi)",
-            ),
-            ("#tool-corner-round-2d", "Corner Rounding Menu & Fillet (C)"),
-            (
-                "#avatar-diagnostics-btn",
-                "Avatar & Dress Form Diagnostics (Shift+A)",
-            ),
-            ("#sim-play-btn", "Start/Stop simulation (Space)"),
-        ] {
+        {
+            let (btn_id, expected_tooltip) = ("#theme-toggle", "Theme");
             let trimmed_id = btn_id.trim_start_matches('#');
             assert_eq!(find_dom_title(&ui_tree, trimmed_id), Some(expected_tooltip));
             let btn_node = find_by_id(&base_scene, trimmed_id)
@@ -9052,5 +9044,80 @@ mod tests {
                 tip_node.layout
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod top_bar_text_tests {
+    use super::*;
+
+    #[test]
+    fn top_bar_and_rails_have_names_only_and_tooltips_only_on_icon_buttons() {
+        let _guard = worker::WORKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let avatar = dir.path().join("avatar.obj");
+        std::fs::write(&avatar, "v 0 0 -10\nv 1 0 -10\nv 0 1 -10\nf 1 2 3\n")
+            .expect("write avatar");
+        let project = FittingProject::basic(GarmentKind::Tshirt, 1, avatar);
+        let scene = project.compile().expect("compile scene");
+        let files = DocumentFiles {
+            output: dir.path().join("out"),
+            source: None,
+            modified: false,
+        };
+        let (tx, latest) = worker::start_cpu().expect("start cpu worker");
+        let mut state = CssRunnerState::new(project, scene, files, tx, latest);
+        state.solver_menu_open = true;
+        for (gpu, method) in [
+            (false, ContactMethod::Ipc),
+            (true, ContactMethod::Ipc),
+            (true, ContactMethod::BarrierAl),
+        ] {
+            state.gpu_sim = gpu;
+            state.contact_method = method;
+            let bar = build_runner_top_bar(&state);
+            assert_eq!(tooltip_policy_violations(&bar), Vec::<String>::new());
+            let text = format!("{bar:?}");
+            for gone in [
+                "Simulation Studio",
+                "(Ctrl+S)",
+                "Artifacts",
+                "(experimental)",
+                "CPU (OGC)",
+            ] {
+                assert!(!text.contains(gone), "top bar still shows {gone:?}");
+            }
+        }
+
+        // Rail buttons are labelled, so they carry no tooltips.
+        for rail in [build_runner_3d_rail(&state), build_runner_2d_rail(&state)] {
+            assert_eq!(tooltip_policy_violations(&rail), Vec::<String>::new());
+        }
+        assert!(format!("{:?}", build_runner_3d_rail(&state)).contains("\"Reset Camera\""));
+
+        // The 2D viewport: labelled pills carry no tooltip, the glyph-only
+        // steppers and zoom buttons carry their name, and the header holds the
+        // zoom value instead of a title and selection echo.
+        for width in [1600.0, 1100.0, 800.0] {
+            state.window_size = (width, 980.0);
+            let board = build_runner_2d_viewport(&state);
+            assert_eq!(tooltip_policy_violations(&board), Vec::<String>::new());
+            let text = format!("{board:?}");
+            for gone in [
+                "2D Pattern Board",
+                "Tool:",
+                "Selected:",
+                "▾",
+                "\"T-\"",
+                "\"-2\"",
+            ] {
+                assert!(!text.contains(gone), "2D viewport still shows {gone:?}");
+            }
+            assert!(text.contains("100%"));
+        }
+        let viewport_3d = format!("{:?}", build_runner_3d_viewport(&state));
+        assert!(!viewport_3d.contains("viewport-title") && !viewport_3d.contains("USD native"));
     }
 }
